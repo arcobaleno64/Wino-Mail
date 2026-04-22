@@ -1,7 +1,6 @@
 using System;
 using System.Collections.Generic;
 using System.ComponentModel;
-using System.Diagnostics;
 using System.Globalization;
 using System.IO;
 using System.Reflection;
@@ -37,7 +36,6 @@ public class PreferencesService(IConfigurationService configurationService) : Ob
         _configurationService.Set(propertyName, value ?? string.Empty);
 
         OnPropertyChanged(propertyName);
-        Debug.WriteLine($"PreferencesService -> {propertyName}:{value?.ToString()}");
     }
 
     public MailRenderingOptions GetRenderingOptions()
@@ -117,6 +115,12 @@ public class PreferencesService(IConfigurationService configurationService) : Ob
     {
         get => _configurationService.Get(nameof(IsThreadingEnabled), true);
         set => SetPropertyAndSave(nameof(IsThreadingEnabled), value);
+    }
+
+    public bool IsNewestThreadMailFirst
+    {
+        get => _configurationService.Get(nameof(IsNewestThreadMailFirst), true);
+        set => SetPropertyAndSave(nameof(IsNewestThreadMailFirst), value);
     }
 
     public bool IsMailListActionBarEnabled
@@ -237,6 +241,18 @@ public class PreferencesService(IConfigurationService configurationService) : Ob
     {
         get => _configurationService.Get<Guid?>(nameof(StartupEntityId), null);
         set => SaveProperty(propertyName: nameof(StartupEntityId), value);
+    }
+
+    public MailOperation FirstMailNotificationAction
+    {
+        get => _configurationService.Get(nameof(FirstMailNotificationAction), MailOperation.MarkAsRead);
+        set => SetPropertyAndSave(nameof(FirstMailNotificationAction), value);
+    }
+
+    public MailOperation SecondMailNotificationAction
+    {
+        get => _configurationService.Get(nameof(SecondMailNotificationAction), MailOperation.SoftDelete);
+        set => SetPropertyAndSave(nameof(SecondMailNotificationAction), value);
     }
 
     public AppLanguage CurrentLanguage
@@ -375,6 +391,12 @@ public class PreferencesService(IConfigurationService configurationService) : Ob
     {
         get => _configurationService.Get(nameof(IsStoreUpdateNotificationsEnabled), true);
         set => SetPropertyAndSave(nameof(IsStoreUpdateNotificationsEnabled), value);
+    }
+
+    public bool IsSystemTrayIconEnabled
+    {
+        get => _configurationService.Get(nameof(IsSystemTrayIconEnabled), true);
+        set => SetPropertyAndSave(nameof(IsSystemTrayIconEnabled), value);
     }
 
     public bool IsWinoAccountButtonHidden

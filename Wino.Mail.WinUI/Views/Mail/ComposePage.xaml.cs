@@ -22,12 +22,10 @@ using Wino.Core.Domain.Entities.Mail;
 using Wino.Core.Domain.Entities.Shared;
 using Wino.Core.Domain.Models.Reader;
 using Wino.Mail.ViewModels.Data;
-using Wino.Mail.ViewModels.Messages;
 using Wino.Mail.WinUI.Controls;
 using Wino.Mail.WinUI.Extensions;
 using Wino.Mail.WinUI.Interfaces;
 using Wino.Mail.WinUI.Models;
-using Wino.Messaging.Client.Mails;
 using Wino.Messaging.Client.Shell;
 using Wino.Views.Abstract;
 
@@ -38,7 +36,11 @@ public sealed partial class ComposePage : ComposePageAbstract,
     IPopoutClient,
     IRecipient<ApplicationThemeChanged>
 {
+    private const int InitialFocusRetryCount = 3;
+
     private bool _isPoppedOut;
+    private bool _isInitialFocusHandled;
+    private readonly Dictionary<TokenizingTextBox, List<AccountContact>> _recipientSuggestions = [];
 
     public bool SupportsPopOut => !_isPoppedOut;
     public event EventHandler<PopOutRequestedEventArgs>? PopOutRequested;
@@ -129,11 +131,16 @@ public sealed partial class ComposePage : ComposePageAbstract,
                             {
                                 _ = ViewModel.ExecuteUIThread(() =>
                                 {
-                                    var addresses = x.Result;
+                                    var addresses = x.Result ?? [];
 
+                                    _recipientSuggestions[box] = addresses;
                                     senderBox.ItemsSource = addresses;
                                 });
                             });
+                        }
+                        else
+                        {
+                            _recipientSuggestions[box] = [];
                         }
                     }
                 });
@@ -290,7 +297,7 @@ public sealed partial class ComposePage : ComposePageAbstract,
     {
         base.OnNavigatedTo(e);
 
-        FocusManager.GotFocus += GlobalFocusManagerGotFocus;
+        // FocusManager.GotFocus += GlobalFocusManagerGotFocus;
 
         var webView = GetWebView();
 
@@ -307,7 +314,7 @@ public sealed partial class ComposePage : ComposePageAbstract,
         _disposables.Add(WebViewEditor);
 
         ViewModel.GetHTMLBodyFunction = WebViewEditor.GetHtmlBodyAsync;
-        ViewModel.RenderHtmlBodyAsyncFunc = WebViewEditor.RenderHtmlAsync;
+        ViewModel.RenderHtmlBodyAsyncFunc = RenderComposeHtmlAsync;
     }
 
     private void ShowCCBCCClicked(object sender, RoutedEventArgs e)
@@ -332,36 +339,60 @@ public sealed partial class ComposePage : ComposePageAbstract,
 
     private async void TokenItemAdding(TokenizingTextBox sender, TokenItemAddingEventArgs args)
     {
-        // Check is valid email.
-        if (!EmailValidator.Validate(args.TokenText))
-        {
-            args.Cancel = true;
-            ViewModel.NotifyInvalidEmail(args.TokenText);
-
-            return;
-        }
-
         var deferral = args.GetDeferral();
-
-        var addedItem = (sender.Tag?.ToString()) switch
+        try
         {
-            "ToBox" => await ViewModel.GetAddressInformationAsync(args.TokenText, ViewModel.ToItems),
-            "CCBox" => await ViewModel.GetAddressInformationAsync(args.TokenText, ViewModel.CCItems),
-            "BCCBox" => await ViewModel.GetAddressInformationAsync(args.TokenText, ViewModel.BCCItems),
-            _ => null
-        };
+            var suggestedContact = GetFirstSuggestedContact(sender);
+            var tokenText = suggestedContact?.Address ?? args.TokenText;
+            var addressCollection = sender.Tag?.ToString() switch
+            {
+                "ToBox" => ViewModel.ToItems,
+                "CCBox" => ViewModel.CCItems,
+                "BCCBox" => ViewModel.BCCItems,
+                _ => null
+            };
 
-        if (addedItem == null)
-        {
-            args.Cancel = true;
-            ViewModel.NotifyAddressExists();
+            if (suggestedContact == null && !EmailValidator.Validate(tokenText))
+            {
+                args.Cancel = true;
+                ViewModel.NotifyInvalidEmail(args.TokenText);
+                return;
+            }
+
+            AccountContact? addedItem = null;
+
+            if (suggestedContact != null)
+            {
+                addedItem = addressCollection?.Any(a => string.Equals(a.Address, suggestedContact.Address, StringComparison.OrdinalIgnoreCase)) == true
+                    ? null
+                    : suggestedContact;
+            }
+            else
+            {
+                addedItem = sender.Tag?.ToString() switch
+                {
+                    "ToBox" => await ViewModel.GetAddressInformationAsync(tokenText, ViewModel.ToItems),
+                    "CCBox" => await ViewModel.GetAddressInformationAsync(tokenText, ViewModel.CCItems),
+                    "BCCBox" => await ViewModel.GetAddressInformationAsync(tokenText, ViewModel.BCCItems),
+                    _ => null
+                };
+            }
+
+            if (addedItem == null)
+            {
+                args.Cancel = true;
+                ViewModel.NotifyAddressExists();
+            }
+            else
+            {
+                args.Item = addedItem;
+            }
         }
-        else
+        finally
         {
-            args.Item = addedItem;
+            _recipientSuggestions[sender] = [];
+            deferral.Complete();
         }
-
-        deferral.Complete();
     }
 
     void IRecipient<ApplicationThemeChanged>.Receive(ApplicationThemeChanged message)
@@ -373,9 +404,10 @@ public sealed partial class ComposePage : ComposePageAbstract,
     {
         if (draftMailItemViewModel == null || !draftMailItemViewModel.IsDraft) return;
 
-        // Reset the initial focus flag so ToBox gets focus for the new draft.
-        isInitialFocusHandled = false;
+        // Reset the initial focus flag for the newly loaded draft.
+        _isInitialFocusHandled = false;
         await ViewModel.RefreshDraftAsync(draftMailItemViewModel);
+        await ApplyInitialFocusAsync();
     }
 
     private void ImportanceClicked(object sender, RoutedEventArgs e)
@@ -434,21 +466,24 @@ public sealed partial class ComposePage : ComposePageAbstract,
         }
     }
 
-    // Hack: Tokenizing text box losing focus somehow on page Loaded and shifting focus to this element.
-    // For once we'll switch back to it once CCBBCGotFocus element got focus.
-
-    private bool isInitialFocusHandled = false;
+    private AccountContact? GetFirstSuggestedContact(TokenizingTextBox box)
+        => _recipientSuggestions.TryGetValue(box, out var suggestions)
+            ? suggestions.FirstOrDefault()
+            : null;
 
     private void ComposerLoaded(object sender, RoutedEventArgs e)
     {
-        ToBox.Focus(FocusState.Programmatic);
+        if (ShouldFocusRecipients())
+        {
+            ToBox.Focus(FocusState.Programmatic);
+        }
     }
 
     private void CCBBCGotFocus(object sender, RoutedEventArgs e)
     {
-        if (!isInitialFocusHandled)
+        if (ShouldFocusRecipients() && !_isInitialFocusHandled)
         {
-            isInitialFocusHandled = true;
+            _isInitialFocusHandled = true;
             ToBox.Focus(FocusState.Programmatic);
         }
     }
@@ -554,5 +589,65 @@ public sealed partial class ComposePage : ComposePageAbstract,
             await ViewModel.UpdateMimeChangesAsync();
         }
         finally { deferral.Complete(); }
+    }
+
+    private bool ShouldFocusRecipients()
+        => !ShouldFocusEditor();
+
+    private bool ShouldFocusEditor()
+    {
+        var inReplyTo = ViewModel.CurrentMimeMessage?.InReplyTo;
+
+        if (string.IsNullOrWhiteSpace(inReplyTo))
+        {
+            inReplyTo = ViewModel.CurrentMailDraftItem?.MailCopy?.InReplyTo;
+        }
+
+        if (string.IsNullOrWhiteSpace(inReplyTo) && ViewModel.CurrentMimeMessage?.Headers.Contains(HeaderId.InReplyTo) == true)
+        {
+            inReplyTo = ViewModel.CurrentMimeMessage.Headers[HeaderId.InReplyTo];
+        }
+
+        return !string.IsNullOrWhiteSpace(inReplyTo);
+    }
+
+    private async Task ApplyInitialFocusAsync()
+    {
+        if (_isInitialFocusHandled)
+        {
+            return;
+        }
+
+        _isInitialFocusHandled = true;
+
+        for (var attempt = 0; attempt < InitialFocusRetryCount; attempt++)
+        {
+            if (ShouldFocusEditor())
+            {
+                await WebViewEditor.FocusEditorAsync(true);
+
+                if (FocusManager.GetFocusedElement() is WebView2)
+                {
+                    return;
+                }
+            }
+            else
+            {
+                ToBox.Focus(FocusState.Programmatic);
+
+                if (FocusManager.GetFocusedElement() == ToBox)
+                {
+                    return;
+                }
+            }
+
+            await Task.Delay(TimeSpan.FromMilliseconds(50));
+        }
+    }
+
+    private async Task RenderComposeHtmlAsync(string html)
+    {
+        await WebViewEditor.RenderHtmlAsync(html);
+        await ApplyInitialFocusAsync();
     }
 }

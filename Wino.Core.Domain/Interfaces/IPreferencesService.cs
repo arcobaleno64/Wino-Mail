@@ -63,6 +63,11 @@ public interface IPreferencesService : INotifyPropertyChanged
     bool IsStoreUpdateNotificationsEnabled { get; set; }
 
     /// <summary>
+    /// Setting: Whether the system tray icon should be created while the shell is available.
+    /// </summary>
+    bool IsSystemTrayIconEnabled { get; set; }
+
+    /// <summary>
     /// Setting: Whether the Wino account profile button in the shell title bar should be hidden.
     /// </summary>
     bool IsWinoAccountButtonHidden { get; set; }
@@ -128,6 +133,11 @@ public interface IPreferencesService : INotifyPropertyChanged
     bool IsThreadingEnabled { get; set; }
 
     /// <summary>
+    /// Setting: Whether the newest message in a conversation should appear first.
+    /// </summary>
+    bool IsNewestThreadMailFirst { get; set; }
+
+    /// <summary>
     /// Setting: Show sender pictures in mail list.
     /// </summary>
     bool IsShowSenderPicturesEnabled { get; set; }
@@ -191,6 +201,16 @@ public interface IPreferencesService : INotifyPropertyChanged
     /// Setting: Which entity id (merged account or folder) should be expanded automatically on startup.
     /// </summary>
     Guid? StartupEntityId { get; set; }
+
+    /// <summary>
+    /// Setting: First action button displayed on mail toast notifications.
+    /// </summary>
+    MailOperation FirstMailNotificationAction { get; set; }
+
+    /// <summary>
+    /// Setting: Second action button displayed on mail toast notifications.
+    /// </summary>
+    MailOperation SecondMailNotificationAction { get; set; }
 
 
 

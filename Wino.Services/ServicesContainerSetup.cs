@@ -13,12 +13,14 @@ public static class ServicesContainerSetup
         services.AddSingleton<IApplicationConfiguration, ApplicationConfiguration>();
         services.AddSingleton<IWinoLogger, WinoLogger>();
         services.AddSingleton<ILaunchProtocolService, LaunchProtocolService>();
+        services.AddSingleton<IShareActivationService, ShareActivationService>();
         services.AddSingleton<IMimeFileService, MimeFileService>();
         services.AddSingleton<ICalendarIcsFileService, CalendarIcsFileService>();
         services.AddTransient<IMimeStorageService, MimeStorageService>();
 
         services.AddTransient<ICalendarService, CalendarService>();
         services.AddTransient<IMailService, MailService>();
+        services.AddTransient<IMailCategoryService, MailCategoryService>();
         services.AddTransient<ISentMailReceiptService, SentMailReceiptService>();
         services.AddTransient<IFolderService, FolderService>();
         services.AddTransient<IAccountService, AccountService>();

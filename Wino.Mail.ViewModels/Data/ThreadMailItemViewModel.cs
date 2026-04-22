@@ -5,6 +5,7 @@ using System.ComponentModel;
 using System.Linq;
 using CommunityToolkit.Mvvm.ComponentModel;
 using Wino.Core.Domain;
+using Wino.Core.Domain.Entities.Mail;
 using Wino.Core.Domain.Entities.Shared;
 using Wino.Core.Domain.Enums;
 using Wino.Core.Domain.Interfaces;
@@ -17,8 +18,9 @@ namespace Wino.Mail.ViewModels.Data;
 public partial class ThreadMailItemViewModel : ObservableRecipient, IMailListItem, IMailItemDisplayInformation
 {
     private readonly string _threadId;
+    private readonly bool _isNewestEmailFirst;
     private readonly HashSet<Guid> _uniqueIdSet = [];
-    private MailItemViewModel _cachedLatestMailViewModel;
+    private MailItemViewModel _cachedNewestMailViewModel;
     private int _suspendChildPropertyNotificationsCount;
 
     [ObservableProperty]
@@ -53,27 +55,27 @@ public partial class ThreadMailItemViewModel : ObservableRecipient, IMailListIte
     /// <summary>
     /// Gets the latest email's subject for display
     /// </summary>
-    public string Subject => latestMailViewModel?.MailCopy?.Subject;
+    public string Subject => newestMailViewModel?.MailCopy?.Subject;
 
     /// <summary>
     /// Gets the latest email's sender name for display
     /// </summary>
-    public string FromName => latestMailViewModel?.MailCopy?.FromName ?? Translator.UnknownSender;
+    public string FromName => newestMailViewModel?.MailCopy?.FromName ?? Translator.UnknownSender;
 
     /// <summary>
     /// Gets the latest email's creation date for sorting
     /// </summary>
-    public DateTime CreationDate => latestMailViewModel?.MailCopy?.CreationDate ?? DateTime.MinValue;
+    public DateTime CreationDate => newestMailViewModel?.MailCopy?.CreationDate ?? DateTime.MinValue;
 
     /// <summary>
     /// Gets the latest email's sender address for display
     /// </summary>
-    public string FromAddress => latestMailViewModel?.FromAddress ?? string.Empty;
+    public string FromAddress => newestMailViewModel?.FromAddress ?? string.Empty;
 
     /// <summary>
     /// Gets the preview text from the latest email
     /// </summary>
-    public string PreviewText => latestMailViewModel?.PreviewText ?? string.Empty;
+    public string PreviewText => newestMailViewModel?.PreviewText ?? string.Empty;
 
     /// <summary>
     /// Gets whether any email in this thread has attachments
@@ -91,20 +93,32 @@ public partial class ThreadMailItemViewModel : ObservableRecipient, IMailListIte
     public bool IsFlagged => ThreadEmails.Any(e => e.IsFlagged);
 
     /// <summary>
+    /// Gets whether any email in this thread is pinned.
+    /// </summary>
+    public bool IsPinned => ThreadEmails.Any(e => e.IsPinned);
+
+    /// <summary>
     /// Gets whether the latest email is focused
     /// </summary>
-    public bool IsFocused => latestMailViewModel?.IsFocused ?? false;
+    public bool IsFocused => newestMailViewModel?.IsFocused ?? false;
 
     /// <summary>
     /// Gets whether all emails in this thread are read
     /// </summary>
     public bool IsRead => ThreadEmails.All(e => e.IsRead);
 
-    public bool HasReadReceiptTracking => latestMailViewModel?.HasReadReceiptTracking ?? false;
+    public bool HasReadReceiptTracking => newestMailViewModel?.HasReadReceiptTracking ?? false;
 
-    public bool IsReadReceiptAcknowledged => latestMailViewModel?.IsReadReceiptAcknowledged ?? false;
+    public bool IsReadReceiptAcknowledged => newestMailViewModel?.IsReadReceiptAcknowledged ?? false;
 
-    public string ReadReceiptDisplayText => latestMailViewModel?.ReadReceiptDisplayText ?? string.Empty;
+    public string ReadReceiptDisplayText => newestMailViewModel?.ReadReceiptDisplayText ?? string.Empty;
+    public IReadOnlyList<MailCategory> Categories => ThreadEmails
+        .SelectMany(a => a.Categories)
+        .GroupBy(a => a.Id)
+        .Select(a => a.First())
+        .OrderBy(a => a.Name)
+        .ToList();
+    public bool HasCategories => ThreadEmails.Any(a => a.HasCategories);
 
     /// <summary>
     /// Gets whether any email in this thread is a draft
@@ -114,58 +128,58 @@ public partial class ThreadMailItemViewModel : ObservableRecipient, IMailListIte
     /// <summary>
     /// Gets the draft ID from the latest email if it's a draft
     /// </summary>
-    public string DraftId => latestMailViewModel?.DraftId ?? string.Empty;
+    public string DraftId => newestMailViewModel?.DraftId ?? string.Empty;
 
     /// <summary>
     /// Gets the ID from the latest email
     /// </summary>
-    public string Id => latestMailViewModel?.Id ?? string.Empty;
+    public string Id => newestMailViewModel?.Id ?? string.Empty;
 
     /// <summary>
     /// Gets the importance of the latest email
     /// </summary>
-    public MailImportance Importance => latestMailViewModel?.Importance ?? MailImportance.Normal;
+    public MailImportance Importance => newestMailViewModel?.Importance ?? MailImportance.Normal;
 
     /// <summary>
     /// Gets the thread ID from the latest email
     /// </summary>
-    public string ThreadId => latestMailViewModel?.ThreadId ?? _threadId;
+    public string ThreadId => newestMailViewModel?.ThreadId ?? _threadId;
 
     /// <summary>
     /// Gets the message ID from the latest email
     /// </summary>
-    public string MessageId => latestMailViewModel?.MessageId ?? string.Empty;
+    public string MessageId => newestMailViewModel?.MessageId ?? string.Empty;
 
     /// <summary>
     /// Gets the references from the latest email
     /// </summary>
-    public string References => latestMailViewModel?.References ?? string.Empty;
+    public string References => newestMailViewModel?.References ?? string.Empty;
 
     /// <summary>
     /// Gets the in-reply-to from the latest email
     /// </summary>
-    public string InReplyTo => latestMailViewModel?.InReplyTo ?? string.Empty;
+    public string InReplyTo => newestMailViewModel?.InReplyTo ?? string.Empty;
 
     /// <summary>
     /// Gets the file ID from the latest email
     /// </summary>
-    public Guid FileId => latestMailViewModel?.FileId ?? Guid.Empty;
+    public Guid FileId => newestMailViewModel?.FileId ?? Guid.Empty;
 
     /// <summary>
     /// Gets the folder ID from the latest email
     /// </summary>
-    public Guid FolderId => latestMailViewModel?.FolderId ?? Guid.Empty;
+    public Guid FolderId => newestMailViewModel?.FolderId ?? Guid.Empty;
 
     /// <summary>
     /// Gets the unique ID from the latest email
     /// </summary>
-    public Guid UniqueId => latestMailViewModel?.UniqueId ?? Guid.Empty;
+    public Guid UniqueId => newestMailViewModel?.UniqueId ?? Guid.Empty;
 
-    public Guid? ContactPictureFileId => latestMailViewModel?.MailCopy?.SenderContact?.ContactPictureFileId;
+    public Guid? ContactPictureFileId => newestMailViewModel?.MailCopy?.SenderContact?.ContactPictureFileId;
 
-    public bool ThumbnailUpdatedEvent => latestMailViewModel?.ThumbnailUpdatedEvent ?? false;
+    public bool ThumbnailUpdatedEvent => newestMailViewModel?.ThumbnailUpdatedEvent ?? false;
 
-    public AccountContact SenderContact => latestMailViewModel?.MailCopy?.SenderContact;
+    public AccountContact SenderContact => newestMailViewModel?.MailCopy?.SenderContact;
 
     /// <summary>
     /// Gets all emails in this thread (observable)
@@ -181,6 +195,7 @@ public partial class ThreadMailItemViewModel : ObservableRecipient, IMailListIte
     [NotifyPropertyChangedFor(nameof(HasAttachments))]
     [NotifyPropertyChangedFor(nameof(IsCalendarEvent))]
     [NotifyPropertyChangedFor(nameof(IsFlagged))]
+    [NotifyPropertyChangedFor(nameof(IsPinned))]
     [NotifyPropertyChangedFor(nameof(IsFocused))]
     [NotifyPropertyChangedFor(nameof(IsRead))]
     [NotifyPropertyChangedFor(nameof(HasReadReceiptTracking))]
@@ -199,17 +214,20 @@ public partial class ThreadMailItemViewModel : ObservableRecipient, IMailListIte
     [NotifyPropertyChangedFor(nameof(UniqueId))]
     [NotifyPropertyChangedFor(nameof(ContactPictureFileId))]
     [NotifyPropertyChangedFor(nameof(SenderContact))]
+    [NotifyPropertyChangedFor(nameof(Categories))]
+    [NotifyPropertyChangedFor(nameof(HasCategories))]
     public partial ObservableCollection<MailItemViewModel> ThreadEmails { get; set; } = [];
 
-    private MailItemViewModel latestMailViewModel => _cachedLatestMailViewModel;
+    private MailItemViewModel newestMailViewModel => _cachedNewestMailViewModel;
 
     public DateTime SortingDate => CreationDate;
 
     public string SortingName => FromName;
 
-    public ThreadMailItemViewModel(string threadId)
+    public ThreadMailItemViewModel(string threadId, bool isNewestEmailFirst)
     {
         _threadId = threadId;
+        _isNewestEmailFirst = isNewestEmailFirst;
     }
 
     internal void SuspendChildPropertyNotifications() => _suspendChildPropertyNotificationsCount++;
@@ -224,9 +242,19 @@ public partial class ThreadMailItemViewModel : ObservableRecipient, IMailListIte
 
     private void RefreshLatestMailCache()
     {
-        _cachedLatestMailViewModel = ThreadEmails
+        _cachedNewestMailViewModel = ThreadEmails
             .OrderByDescending(static item => item.MailCopy.CreationDate)
             .FirstOrDefault();
+    }
+
+    public MailItemViewModel GetDefaultSelectedThreadEmail()
+    {
+        if (ThreadEmails.Count == 0)
+        {
+            return null;
+        }
+
+        return _isNewestEmailFirst ? ThreadEmails.FirstOrDefault() : ThreadEmails.LastOrDefault();
     }
 
     /// <summary>
@@ -237,11 +265,15 @@ public partial class ThreadMailItemViewModel : ObservableRecipient, IMailListIte
         if (email.MailCopy.ThreadId != _threadId)
             throw new ArgumentException($"Email ThreadId '{email.MailCopy.ThreadId}' does not match expander ThreadId '{_threadId}'");
 
-        // Insert email in sorted order by CreationDate (newest first, oldest last)
+        // Insert email in sorted order by CreationDate based on the configured thread direction.
         var insertIndex = 0;
         for (int i = 0; i < ThreadEmails.Count; i++)
         {
-            if (ThreadEmails[i].MailCopy.CreationDate < email.MailCopy.CreationDate)
+            bool shouldInsertBefore = _isNewestEmailFirst
+                ? ThreadEmails[i].MailCopy.CreationDate < email.MailCopy.CreationDate
+                : ThreadEmails[i].MailCopy.CreationDate > email.MailCopy.CreationDate;
+
+            if (shouldInsertBefore)
             {
                 insertIndex = i;
                 break;
@@ -298,7 +330,7 @@ public partial class ThreadMailItemViewModel : ObservableRecipient, IMailListIte
 
         if (e.PropertyName == nameof(MailItemViewModel.ThumbnailUpdatedEvent))
         {
-            if (ReferenceEquals(updatedMailItem, latestMailViewModel))
+            if (ReferenceEquals(updatedMailItem, newestMailViewModel))
             {
                 OnPropertyChanged(nameof(ThumbnailUpdatedEvent));
             }
@@ -329,7 +361,7 @@ public partial class ThreadMailItemViewModel : ObservableRecipient, IMailListIte
         if (changedFlags == MailCopyChangeFlags.None)
             return;
 
-        var previousLatest = latestMailViewModel;
+        var previousLatest = newestMailViewModel;
 
         if (changedFlags == MailCopyChangeFlags.All ||
             (changedFlags & MailCopyChangeFlags.CreationDate) != 0 ||
@@ -339,7 +371,7 @@ public partial class ThreadMailItemViewModel : ObservableRecipient, IMailListIte
             RefreshLatestMailCache();
         }
 
-        var currentLatest = latestMailViewModel;
+        var currentLatest = newestMailViewModel;
         var latestChanged = !ReferenceEquals(previousLatest, currentLatest);
 
         var updatesDisplayedLatest = changedFlags == MailCopyChangeFlags.All ||
@@ -445,6 +477,12 @@ public partial class ThreadMailItemViewModel : ObservableRecipient, IMailListIte
                     Queue(nameof(ContactPictureFileId));
                     Queue(nameof(SenderContact));
                 }
+
+                if ((changedFlags & MailCopyChangeFlags.Categories) != 0)
+                {
+                    Queue(nameof(Categories));
+                    Queue(nameof(HasCategories));
+                }
             }
         }
 
@@ -456,6 +494,9 @@ public partial class ThreadMailItemViewModel : ObservableRecipient, IMailListIte
 
         if ((changedFlags & MailCopyChangeFlags.IsFlagged) != 0 || changedFlags == MailCopyChangeFlags.All)
             Queue(nameof(IsFlagged));
+
+        if ((changedFlags & MailCopyChangeFlags.IsPinned) != 0 || changedFlags == MailCopyChangeFlags.All)
+            Queue(nameof(IsPinned));
 
         if ((changedFlags & MailCopyChangeFlags.IsRead) != 0 || changedFlags == MailCopyChangeFlags.All)
             Queue(nameof(IsRead));
@@ -469,6 +510,12 @@ public partial class ThreadMailItemViewModel : ObservableRecipient, IMailListIte
 
         if ((changedFlags & MailCopyChangeFlags.IsDraft) != 0 || changedFlags == MailCopyChangeFlags.All)
             Queue(nameof(IsDraft));
+
+        if ((changedFlags & MailCopyChangeFlags.Categories) != 0 || changedFlags == MailCopyChangeFlags.All)
+        {
+            Queue(nameof(Categories));
+            Queue(nameof(HasCategories));
+        }
 
         foreach (var changedProperty in changedProperties)
         {

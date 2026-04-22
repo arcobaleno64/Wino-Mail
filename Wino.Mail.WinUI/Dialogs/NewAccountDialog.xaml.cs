@@ -8,6 +8,7 @@ using Wino.Core.Domain;
 using Wino.Core.Domain.Enums;
 using Wino.Core.Domain.Interfaces;
 using Wino.Core.Domain.Models.Accounts;
+using Wino.Core.Domain.Validation;
 using Wino.Core.ViewModels.Data;
 using Wino.Helpers;
 
@@ -15,7 +16,7 @@ namespace Wino.Mail.WinUI.Dialogs;
 
 public sealed partial class NewAccountDialog : ContentDialog
 {
-    private readonly Dictionary<SpecialImapProvider, string> helpingLinks = new Dictionary<SpecialImapProvider, string>()
+    private readonly Dictionary<SpecialImapProvider, string> helpingLinks = new()
     {
         { SpecialImapProvider.iCloud, "https://support.apple.com/en-us/102654" },
         { SpecialImapProvider.Yahoo, "http://help.yahoo.com/kb/SLN15241.html" },
@@ -26,7 +27,6 @@ public sealed partial class NewAccountDialog : ContentDialog
     public static readonly DependencyProperty SelectedMailProviderProperty = DependencyProperty.Register(nameof(SelectedMailProvider), typeof(ProviderDetail), typeof(NewAccountDialog), new PropertyMetadata(null, new PropertyChangedCallback(OnSelectedProviderChanged)));
     public static readonly DependencyProperty SelectedColorProperty = DependencyProperty.Register(nameof(SelectedColor), typeof(AppColorViewModel), typeof(NewAccountDialog), new PropertyMetadata(null, new PropertyChangedCallback(OnSelectedColorChanged)));
     public static readonly DependencyProperty SelectedCalendarModeIndexProperty = DependencyProperty.Register(nameof(SelectedCalendarModeIndex), typeof(int), typeof(NewAccountDialog), new PropertyMetadata(0));
-
 
     public AppColorViewModel? SelectedColor
     {
@@ -49,7 +49,6 @@ public sealed partial class NewAccountDialog : ContentDialog
         set { SetValue(SelectedMailProviderProperty, value); }
     }
 
-
     public bool IsProviderSelectionVisible
     {
         get { return (bool)GetValue(IsProviderSelectionVisibleProperty); }
@@ -63,17 +62,22 @@ public sealed partial class NewAccountDialog : ContentDialog
     }
 
     // List of available mail providers for now.
-
     public List<IProviderDetail> Providers { get; set; } = [];
-
     public List<AppColorViewModel> AvailableColors { get; set; } = [];
+    public List<InitialSynchronizationRangeOption> InitialSynchronizationRanges { get; } =
+    [
+        new(InitialSynchronizationRange.ThreeMonths, Translator.AccountCreation_InitialSynchronization_3Months),
+        new(InitialSynchronizationRange.SixMonths, Translator.AccountCreation_InitialSynchronization_6Months),
+        new(InitialSynchronizationRange.NineMonths, Translator.AccountCreation_InitialSynchronization_9Months),
+        new(InitialSynchronizationRange.OneYear, Translator.AccountCreation_InitialSynchronization_Year),
+        new(InitialSynchronizationRange.Everything, Translator.AccountCreation_InitialSynchronization_Everything)
+    ];
     public List<string> CalendarModeOptions { get; } =
     [
         Translator.ImapCalDavSettingsPage_CalendarModeCalDav,
         Translator.ImapCalDavSettingsPage_CalendarModeLocalOnly,
         Translator.ImapCalDavSettingsPage_CalendarModeDisabled
     ];
-
 
     public AccountCreationDialogResult? Result = null;
 
@@ -85,6 +89,8 @@ public sealed partial class NewAccountDialog : ContentDialog
         AvailableColors = themeService.Select(a => new AppColorViewModel(a)).ToList();
 
         UpdateSelectedColor();
+        InitialSynchronizationComboBox.SelectedItem = InitialSynchronizationRanges.First(option => option.Range == InitialSynchronizationRange.SixMonths);
+        UpdateInitialSynchronizationState();
     }
 
     private static void OnSelectedProviderChanged(DependencyObject obj, DependencyPropertyChangedEventArgs args)
@@ -105,6 +111,19 @@ public sealed partial class NewAccountDialog : ContentDialog
         SelectedColorEllipse.Fill = SelectedColor == null ? null : XamlHelpers.GetSolidColorBrushFromHex(SelectedColor.Hex);
     }
 
+    private void UpdateInitialSynchronizationState()
+    {
+        InitialSynchronizationPanel.Visibility = SelectedMailProvider == null ? Visibility.Collapsed : Visibility.Visible;
+        var selectedOption = InitialSynchronizationComboBox.SelectedItem as InitialSynchronizationRangeOption;
+        InitialSynchronizationWarningBar.Visibility = selectedOption?.IsEverything == true ? Visibility.Visible : Visibility.Collapsed;
+    }
+
+    private InitialSynchronizationRange GetInitialSynchronizationRange()
+    {
+        var selectedRange = (InitialSynchronizationComboBox.SelectedItem as InitialSynchronizationRangeOption)?.Range
+            ?? InitialSynchronizationRange.SixMonths;
+        return selectedRange;
+    }
 
     private void CancelClicked(ContentDialog sender, ContentDialogButtonClickEventArgs args)
     {
@@ -116,9 +135,11 @@ public sealed partial class NewAccountDialog : ContentDialog
         if (SelectedMailProvider == null)
             return;
 
+        var initialSynchronizationRange = GetInitialSynchronizationRange();
+
         if (IsSpecialImapServerPartVisible)
         {
-            // Special imap detail input.
+            // Special IMAP detail input.
             var calendarSupportMode = SelectedCalendarModeIndex switch
             {
                 1 => ImapCalendarSupportMode.LocalOnly,
@@ -132,7 +153,14 @@ public sealed partial class NewAccountDialog : ContentDialog
                 DisplayNameTextBox.Text.Trim(),
                 SelectedMailProvider.SpecialImapProvider,
                 calendarSupportMode);
-            Result = new AccountCreationDialogResult(SelectedMailProvider.Type, AccountNameTextbox.Text.Trim(), details, SelectedColor?.Hex ?? string.Empty);
+            Result = new AccountCreationDialogResult(
+                SelectedMailProvider.Type,
+                AccountNameTextbox.Text.Trim(),
+                details,
+                SelectedColor?.Hex ?? string.Empty,
+                initialSynchronizationRange,
+                true,
+                calendarSupportMode != ImapCalendarSupportMode.Disabled);
             Hide();
 
             return;
@@ -140,11 +168,11 @@ public sealed partial class NewAccountDialog : ContentDialog
 
         Validate();
 
-        if (IsSecondaryButtonEnabled)
+        if (IsPrimaryButtonEnabled)
         {
             if (SelectedMailProvider.SpecialImapProvider != SpecialImapProvider.None)
             {
-                // This step requires app-sepcific password login for some providers.
+                // This step requires app-specific password login for some providers.
                 args.Cancel = true;
 
                 IsProviderSelectionVisible = false;
@@ -154,7 +182,14 @@ public sealed partial class NewAccountDialog : ContentDialog
             }
             else
             {
-                Result = new AccountCreationDialogResult(SelectedMailProvider.Type, AccountNameTextbox.Text.Trim(), null, SelectedColor?.Hex ?? string.Empty);
+                Result = new AccountCreationDialogResult(
+                    SelectedMailProvider.Type,
+                    AccountNameTextbox.Text.Trim(),
+                    null,
+                    SelectedColor?.Hex ?? string.Empty,
+                    initialSynchronizationRange,
+                    true,
+                    true);
                 Hide();
             }
         }
@@ -167,6 +202,7 @@ public sealed partial class NewAccountDialog : ContentDialog
     {
         ValidateCreateButton();
         ValidateNames();
+        UpdateInitialSynchronizationState();
     }
 
     // Returns whether we can create account or not.
@@ -177,7 +213,7 @@ public sealed partial class NewAccountDialog : ContentDialog
             && !string.IsNullOrEmpty(AccountNameTextbox.Text)
             && (IsSpecialImapServerPartVisible ? (!string.IsNullOrEmpty(AppSpecificPassword.Password)
             && !string.IsNullOrEmpty(DisplayNameTextBox.Text)
-            && EmailValidation.EmailValidator.Validate(SpecialImapAddress.Text)) : true);
+            && MailAccountAddressValidator.IsValid(SpecialImapAddress.Text)) : true);
 
         IsPrimaryButtonEnabled = shouldEnable;
     }
@@ -198,6 +234,9 @@ public sealed partial class NewAccountDialog : ContentDialog
     }
 
     private void ImapPasswordChanged(object sender, RoutedEventArgs e) => Validate();
+
+    private void InitialSynchronizationSelectionChanged(object sender, SelectionChangedEventArgs e)
+        => UpdateInitialSynchronizationState();
 
     private async void AppSpecificHelpButtonClicked(object sender, RoutedEventArgs e)
     {

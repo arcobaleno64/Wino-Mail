@@ -6,7 +6,6 @@ using CommunityToolkit.Mvvm.Messaging;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
 using Wino.Core.Domain;
-using Wino.Core.Domain.Entities.Calendar;
 using Wino.Core.Domain.Entities.Mail;
 using Wino.Core.Domain.Entities.Shared;
 using Wino.Core.Domain.Enums;
@@ -15,11 +14,12 @@ using Wino.Core.Domain.Models;
 using Wino.Core.Domain.Models.Accounts;
 using Wino.Core.Domain.Models.Calendar;
 using Wino.Core.Domain.Models.Folders;
+using Wino.Core.Domain.Models.MailItem;
 using Wino.Core.Domain.Models.Synchronization;
-using Wino.Mail.WinUI.Extensions;
-using Wino.Mail.WinUI.Services;
 using Wino.Dialogs;
 using Wino.Mail.Dialogs;
+using Wino.Mail.WinUI.Extensions;
+using Wino.Mail.WinUI.Services;
 using Wino.Messaging.Server;
 using Wino.Messaging.UI;
 
@@ -40,6 +40,12 @@ public class DialogService : DialogServiceBase, IMailDialogService
         _winoAccountDataSyncService = winoAccountDataSyncService;
     }
 
+    public void ShowReadOnlyCalendarMessage()
+        => InfoBarMessage(
+            Translator.CalendarReadOnly_Title,
+            Translator.CalendarReadOnly_Message,
+            InfoBarMessageType.Warning);
+
     public async Task<ICreateAccountAliasDialog> ShowCreateAccountAliasDialogAsync()
     {
         var createAccountAliasDialog = new CreateAccountAliasDialog()
@@ -50,6 +56,19 @@ public class DialogService : DialogServiceBase, IMailDialogService
         await HandleDialogPresentationAsync(createAccountAliasDialog);
 
         return createAccountAliasDialog;
+    }
+
+#pragma warning disable CS8625
+    public async Task<MailCategoryDialogResult> ShowEditMailCategoryDialogAsync(MailCategory category = null)
+#pragma warning restore CS8625
+    {
+        var dialog = new EditMailCategoryDialog(category)
+        {
+            RequestedTheme = ThemeService.RootTheme.ToWindowsElementTheme()
+        };
+
+        await HandleDialogPresentationAsync(dialog);
+        return dialog.Result;
     }
 
     public async Task HandleSystemFolderConfigurationDialogAsync(Guid accountId, IFolderService folderService)
@@ -117,6 +136,41 @@ public class DialogService : DialogServiceBase, IMailDialogService
                                            Translator.Buttons_Yes,
                                            WinoCustomMessageDialogIcon.Warning,
                                            Translator.Buttons_No);
+
+    public async Task<ThreeButtonDialogResult> ShowThreeButtonDialogAsync(string title,
+                                                                          string description,
+                                                                          string primaryButtonText,
+                                                                          string secondaryButtonText,
+                                                                          string cancelButtonText,
+                                                                          WinoCustomMessageDialogIcon? icon = null)
+    {
+        var informationContainer = new CustomMessageDialogInformationContainer(
+            title,
+            description,
+            icon ?? WinoCustomMessageDialogIcon.Information,
+            false);
+
+        var dialog = new ContentDialog
+        {
+            Style = ApplicationResourceManager.GetResource<Style>("WinoDialogStyle"),
+            RequestedTheme = ThemeService.RootTheme.ToWindowsElementTheme(),
+            DefaultButton = ContentDialogButton.Primary,
+            PrimaryButtonText = primaryButtonText,
+            SecondaryButtonText = secondaryButtonText,
+            CloseButtonText = cancelButtonText,
+            ContentTemplate = ApplicationResourceManager.GetResource<DataTemplate>("CustomWinoContentDialogContentTemplate"),
+            Content = informationContainer
+        };
+
+        var dialogResult = await HandleDialogPresentationAsync(dialog);
+
+        return dialogResult switch
+        {
+            ContentDialogResult.Primary => ThreeButtonDialogResult.Primary,
+            ContentDialogResult.Secondary => ThreeButtonDialogResult.Secondary,
+            _ => ThreeButtonDialogResult.Cancel
+        };
+    }
 
     public async Task<MailAccount> ShowAccountPickerDialogAsync(List<MailAccount> availableAccounts)
     {

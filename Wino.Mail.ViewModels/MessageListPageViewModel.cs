@@ -4,6 +4,7 @@ using System.ComponentModel;
 using System.Threading.Tasks;
 using CommunityToolkit.Mvvm.Input;
 using Wino.Core.Domain;
+using Wino.Core.Domain.Entities.Mail;
 using Wino.Core.Domain.Entities.Shared;
 using Wino.Core.Domain.Enums;
 using Wino.Core.Domain.Interfaces;
@@ -42,6 +43,12 @@ public partial class MessageListPageViewModel : MailBaseViewModel
         Translator.HoverActionOption_MoveJunk
     ];
 
+    public List<string> ThreadItemSortingOptions { get; } =
+    [
+        Translator.SettingsThreadOrder_LastItemFirst,
+        Translator.SettingsThreadOrder_FirstItemFirst
+    ];
+
     public IMailItemDisplayInformation DemoPreviewMailItemInformation { get; } = new DemoMailItemDisplayInformation();
 
     public MailListDisplayMode SelectedMailSpacingMode => availableMailSpacingOptions[selectedMailSpacingIndex];
@@ -69,6 +76,19 @@ public partial class MessageListPageViewModel : MailBaseViewModel
             {
                 PreferencesService.MailItemDisplayMode = availableMailSpacingOptions[value];
                 OnPropertyChanged(nameof(SelectedMailSpacingMode));
+            }
+        }
+    }
+
+    private int selectedThreadItemSortingIndex;
+    public int SelectedThreadItemSortingIndex
+    {
+        get => selectedThreadItemSortingIndex;
+        set
+        {
+            if (SetProperty(ref selectedThreadItemSortingIndex, value) && value >= 0)
+            {
+                PreferencesService.IsNewestThreadMailFirst = value == 0;
             }
         }
     }
@@ -128,6 +148,7 @@ public partial class MessageListPageViewModel : MailBaseViewModel
         rightHoverActionIndex = availableHoverActions.IndexOf(PreferencesService.RightHoverAction);
         selectedMailSpacingIndex = availableMailSpacingOptions.IndexOf(PreferencesService.MailItemDisplayMode);
         SelectedMarkAsOptionIndex = Array.IndexOf(Enum.GetValues<MailMarkAsOption>(), PreferencesService.MarkAsPreference);
+        selectedThreadItemSortingIndex = PreferencesService.IsNewestThreadMailFirst ? 0 : 1;
     }
 
     [RelayCommand]
@@ -167,6 +188,24 @@ public partial class MessageListPageViewModel : MailBaseViewModel
         public bool HasReadReceiptTracking => true;
         public bool IsReadReceiptAcknowledged => false;
         public string ReadReceiptDisplayText => Translator.MailReceiptStatus_Requested;
+        public IReadOnlyList<MailCategory> Categories =>
+        [
+            new()
+            {
+                Id = Guid.NewGuid(),
+                Name = "Urgent",
+                BackgroundColorHex = "#FFE1DE",
+                TextColorHex = "#A1260D"
+            },
+            new()
+            {
+                Id = Guid.NewGuid(),
+                Name = "Client",
+                BackgroundColorHex = "#E4E8FF",
+                TextColorHex = "#4255C5"
+            }
+        ];
+        public bool HasCategories => Categories.Count > 0;
         public AccountContact SenderContact => new()
         {
             Address = "hi@bkaan.dev",

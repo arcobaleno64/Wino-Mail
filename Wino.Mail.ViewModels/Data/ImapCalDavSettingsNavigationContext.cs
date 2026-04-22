@@ -10,7 +10,8 @@ public enum ImapCalDavSettingsPageMode
 {
     Create,
     Edit,
-    Wizard
+    Wizard,
+    AddAccount
 }
 
 public sealed class ImapCalDavSettingsNavigationContext
@@ -45,6 +46,14 @@ public sealed class ImapCalDavSettingsNavigationContext
             AccountCreationDialogResult = accountCreationDialogResult
         };
 
+    public static ImapCalDavSettingsNavigationContext CreateForAddAccountMode(
+        AccountCreationDialogResult accountCreationDialogResult)
+        => new()
+        {
+            Mode = ImapCalDavSettingsPageMode.AddAccount,
+            AccountCreationDialogResult = accountCreationDialogResult
+        };
+
     public bool IsWizardMode => Mode == ImapCalDavSettingsPageMode.Wizard;
 }
 
@@ -52,6 +61,7 @@ public sealed class ImapCalDavSetupResult
 {
     public string DisplayName { get; init; }
     public string EmailAddress { get; init; }
+    public bool IsMailAccessGranted { get; init; }
     public bool IsCalendarAccessGranted { get; init; }
     public CustomServerInformation ServerInformation { get; init; }
 }

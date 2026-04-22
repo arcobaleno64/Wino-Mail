@@ -49,6 +49,8 @@ public class DatabaseService : IDatabaseService
     {
         await Task.WhenAll(
             Connection.CreateTableAsync<MailCopy>(),
+            Connection.CreateTableAsync<MailCategory>(),
+            Connection.CreateTableAsync<MailCategoryAssignment>(),
             Connection.CreateTableAsync<MailItemFolder>(),
             Connection.CreateTableAsync<MailAccount>(),
             Connection.CreateTableAsync<AccountContact>(),
@@ -79,6 +81,38 @@ public class DatabaseService : IDatabaseService
     {
         await EnsureKeyboardShortcutSchemaAsync().ConfigureAwait(false);
 
+        var mailCopyColumns = await Connection.GetTableInfoAsync(nameof(MailCopy)).ConfigureAwait(false);
+
+        if (!mailCopyColumns.Any(c => c.Name == nameof(MailCopy.IsPinned)))
+        {
+            await Connection
+                .ExecuteAsync($"ALTER TABLE {nameof(MailCopy)} ADD COLUMN {nameof(MailCopy.IsPinned)} INTEGER NOT NULL DEFAULT 0")
+                .ConfigureAwait(false);
+        }
+
+        var accountColumns = await Connection.GetTableInfoAsync(nameof(MailAccount)).ConfigureAwait(false);
+
+        if (!accountColumns.Any(c => c.Name == nameof(MailAccount.CreatedAt)))
+        {
+            await Connection
+                .ExecuteAsync($"ALTER TABLE {nameof(MailAccount)} ADD COLUMN {nameof(MailAccount.CreatedAt)} TEXT NULL")
+                .ConfigureAwait(false);
+        }
+
+        if (!accountColumns.Any(c => c.Name == nameof(MailAccount.InitialSynchronizationRange)))
+        {
+            await Connection
+                .ExecuteAsync($"ALTER TABLE {nameof(MailAccount)} ADD COLUMN {nameof(MailAccount.InitialSynchronizationRange)} INTEGER NOT NULL DEFAULT {(int)InitialSynchronizationRange.SixMonths}")
+                .ConfigureAwait(false);
+        }
+
+        if (!accountColumns.Any(c => c.Name == nameof(MailAccount.IsMailAccessGranted)))
+        {
+            await Connection
+                .ExecuteAsync($"ALTER TABLE {nameof(MailAccount)} ADD COLUMN {nameof(MailAccount.IsMailAccessGranted)} INTEGER NOT NULL DEFAULT 1")
+                .ConfigureAwait(false);
+        }
+
         var folderColumns = await Connection.GetTableInfoAsync(nameof(MailItemFolder)).ConfigureAwait(false);
 
         if (!folderColumns.Any(c => c.Name == nameof(MailItemFolder.HighestKnownUid)))
@@ -92,6 +126,13 @@ public class DatabaseService : IDatabaseService
         {
             await Connection
                 .ExecuteAsync($"ALTER TABLE {nameof(MailItemFolder)} ADD COLUMN {nameof(MailItemFolder.LastUidReconcileUtc)} TEXT NULL")
+                .ConfigureAwait(false);
+        }
+
+        if (!folderColumns.Any(c => c.Name == nameof(MailItemFolder.Order)))
+        {
+            await Connection
+                .ExecuteAsync($"ALTER TABLE {nameof(MailItemFolder)} ADD COLUMN \"{nameof(MailItemFolder.Order)}\" INTEGER NOT NULL DEFAULT 0")
                 .ConfigureAwait(false);
         }
 
@@ -152,6 +193,13 @@ public class DatabaseService : IDatabaseService
                 .ConfigureAwait(false);
         }
 
+        if (!accountCalendarColumns.Any(c => c.Name == nameof(AccountCalendar.IsReadOnly)))
+        {
+            await Connection
+                .ExecuteAsync($"ALTER TABLE {nameof(AccountCalendar)} ADD COLUMN {nameof(AccountCalendar.IsReadOnly)} INTEGER NOT NULL DEFAULT 0")
+                .ConfigureAwait(false);
+        }
+
         await Connection.ExecuteAsync("DROP TABLE IF EXISTS WinoAccountAddOnCache").ConfigureAwait(false);
     }
 
@@ -203,6 +251,12 @@ SET {nameof(KeyboardShortcut.Action)} =
         await Connection.ExecuteAsync("CREATE INDEX IF NOT EXISTS IX_MailCopy_MessageId ON MailCopy(MessageId)").ConfigureAwait(false);
         await Connection.ExecuteAsync("CREATE INDEX IF NOT EXISTS IX_MailCopy_FolderId_IsRead ON MailCopy(FolderId, IsRead)").ConfigureAwait(false);
         await Connection.ExecuteAsync("CREATE INDEX IF NOT EXISTS IX_MailCopy_CreationDate ON MailCopy(CreationDate)").ConfigureAwait(false);
+        await Connection.ExecuteAsync("CREATE INDEX IF NOT EXISTS IX_MailCategory_MailAccountId ON MailCategory(MailAccountId)").ConfigureAwait(false);
+        await Connection.ExecuteAsync("CREATE INDEX IF NOT EXISTS IX_MailCategory_MailAccountId_Name ON MailCategory(MailAccountId, Name)").ConfigureAwait(false);
+        await Connection.ExecuteAsync("CREATE INDEX IF NOT EXISTS IX_MailCategory_MailAccountId_IsFavorite ON MailCategory(MailAccountId, IsFavorite)").ConfigureAwait(false);
+        await Connection.ExecuteAsync("CREATE INDEX IF NOT EXISTS IX_MailCategoryAssignment_MailCategoryId ON MailCategoryAssignment(MailCategoryId)").ConfigureAwait(false);
+        await Connection.ExecuteAsync("CREATE INDEX IF NOT EXISTS IX_MailCategoryAssignment_MailCopyUniqueId ON MailCategoryAssignment(MailCopyUniqueId)").ConfigureAwait(false);
+        await Connection.ExecuteAsync("CREATE UNIQUE INDEX IF NOT EXISTS IX_MailCategoryAssignment_Category_MailCopy ON MailCategoryAssignment(MailCategoryId, MailCopyUniqueId)").ConfigureAwait(false);
 
         await Connection.ExecuteAsync("CREATE INDEX IF NOT EXISTS IX_MailItemFolder_MailAccountId ON MailItemFolder(MailAccountId)").ConfigureAwait(false);
         await Connection.ExecuteAsync("CREATE INDEX IF NOT EXISTS IX_MailItemFolder_MailAccountId_RemoteFolderId ON MailItemFolder(MailAccountId, RemoteFolderId)").ConfigureAwait(false);

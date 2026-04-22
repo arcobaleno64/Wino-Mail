@@ -74,14 +74,17 @@ public class NavigationService : NavigationServiceBase, INavigationService
         WinoPage.ManageAccountsPage,
         WinoPage.AccountManagementPage,
         WinoPage.AccountDetailsPage,
+        WinoPage.FolderCustomizationPage,
         WinoPage.MergedAccountDetailsPage,
         WinoPage.SignatureManagementPage,
         WinoPage.AboutPage,
         WinoPage.PersonalizationPage,
         WinoPage.MessageListPage,
+        WinoPage.MailNotificationSettingsPage,
         WinoPage.ReadComposePanePage,
         WinoPage.AppPreferencesPage,
         WinoPage.AliasManagementPage,
+        WinoPage.MailCategoryManagementPage,
         WinoPage.ImapCalDavSettingsPage,
         WinoPage.KeyboardShortcutsPage,
         WinoPage.SignatureAndEncryptionPage,
@@ -134,6 +137,7 @@ public class NavigationService : NavigationServiceBase, INavigationService
             WinoPage.None => null,
             WinoPage.IdlePage => typeof(IdlePage),
             WinoPage.AccountDetailsPage => typeof(AccountDetailsPage),
+            WinoPage.FolderCustomizationPage => typeof(FolderCustomizationPage),
             WinoPage.MergedAccountDetailsPage => typeof(MergedAccountDetailsPage),
             WinoPage.AccountManagementPage => typeof(AccountManagementPage),
             WinoPage.ManageAccountsPage => typeof(AccountManagementPage),
@@ -141,6 +145,7 @@ public class NavigationService : NavigationServiceBase, INavigationService
             WinoPage.AboutPage => typeof(AboutPage),
             WinoPage.PersonalizationPage => typeof(PersonalizationPage),
             WinoPage.MessageListPage => typeof(MessageListPage),
+            WinoPage.MailNotificationSettingsPage => typeof(MailNotificationSettingsPage),
             WinoPage.ReadComposePanePage => typeof(ReadComposePanePage),
             WinoPage.MailRenderingPage => typeof(MailRenderingPage),
             WinoPage.ComposePage => typeof(ComposePage),
@@ -150,6 +155,7 @@ public class NavigationService : NavigationServiceBase, INavigationService
             WinoPage.SettingOptionsPage => typeof(SettingOptionsPage),
             WinoPage.AppPreferencesPage => typeof(AppPreferencesPage),
             WinoPage.AliasManagementPage => typeof(AliasManagementPage),
+            WinoPage.MailCategoryManagementPage => typeof(MailCategoryManagementPage),
             WinoPage.ImapCalDavSettingsPage => typeof(ImapCalDavSettingsPage),
             WinoPage.KeyboardShortcutsPage => typeof(KeyboardShortcutsPage),
             WinoPage.ContactsPage => typeof(ContactsPage),
@@ -239,7 +245,19 @@ public class NavigationService : NavigationServiceBase, INavigationService
         _statePersistanceService.AppModeTitle = GetApplicationModeTitle(mode);
 
         if (coreFrame.Content is IShellHost activeShell && activeShell.HasShellContent && currentMode == mode)
+        {
+            if (activationContext?.Parameter != null)
+            {
+                activeShell.ActivateMode(mode, new ShellModeActivationContext
+                {
+                    IsInitialActivation = false,
+                    SuppressStartupFlows = activationContext.SuppressStartupFlows,
+                    Parameter = activationContext.Parameter
+                });
+            }
+
             return true;
+        }
 
         _pendingInnerShellTransition = isInitialShellNavigation
             ? null
@@ -500,7 +518,7 @@ public class NavigationService : NavigationServiceBase, INavigationService
             : DateOnly.FromDateTime(args.NavigationDate.Date);
 
         var displayRequest = new CalendarDisplayRequest(_statePersistanceService.CalendarDisplayType, targetDate);
-        return new LoadCalendarMessage(displayRequest, args.ForceReload);
+        return new LoadCalendarMessage(displayRequest, args.ForceReload, args.PendingTarget);
     }
 
     private bool NavigateInnerShellFrame(Frame frame, Type pageType, object? parameter, NavigationTransitionType transition)

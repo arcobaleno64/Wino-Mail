@@ -68,6 +68,11 @@ public static class SettingsNavigationInfoProvider
                 Translator.SettingsMessageList_Description,
                 "\uE8C4",
                 searchKeywords: Translator.SettingsSearch_MessageList_Keywords),
+            new(WinoPage.MailNotificationSettingsPage,
+                Translator.SettingsMailNotifications_Title,
+                Translator.SettingsMailNotifications_Description,
+                "\uE7F4",
+                searchKeywords: Translator.SettingsSearch_MailNotifications_Keywords),
             new(WinoPage.ReadComposePanePage,
                 Translator.SettingsReadComposePane_Title,
                 Translator.SettingsReadComposePane_Description,
@@ -136,7 +141,9 @@ public static class SettingsNavigationInfoProvider
     public static SettingsNavigationItemInfo GetInfo(WinoPage pageType, string manageAccountsDescription = "")
     {
         var rootPage = GetRootPage(pageType);
-        return GetNavigationItems(manageAccountsDescription).First(item => item.PageType == rootPage);
+        return GetNavigationItems(manageAccountsDescription)
+            .FirstOrDefault(item => item.PageType == rootPage)
+            ?? GetNavigationItems(manageAccountsDescription).First(item => item.PageType == WinoPage.SettingOptionsPage);
     }
 
     public static string GetPageTitle(WinoPage pageType)
@@ -149,6 +156,7 @@ public static class SettingsNavigationInfoProvider
             WinoPage.PersonalizationPage => Translator.SettingsPersonalization_Title,
             WinoPage.AboutPage => Translator.SettingsAbout_Title,
             WinoPage.MessageListPage => Translator.SettingsMessageList_Title,
+            WinoPage.MailNotificationSettingsPage => Translator.SettingsMailNotifications_Title,
             WinoPage.ReadComposePanePage => Translator.SettingsReadComposePane_Title,
             WinoPage.AppPreferencesPage => Translator.SettingsAppPreferences_Title,
             WinoPage.CalendarSettingsPage => Translator.CalendarSettings_Preferences_Title,
@@ -170,8 +178,13 @@ public static class SettingsNavigationInfoProvider
             WinoPage.AccountDetailsPage => WinoPage.ManageAccountsPage,
             WinoPage.MergedAccountDetailsPage => WinoPage.ManageAccountsPage,
             WinoPage.AliasManagementPage => WinoPage.ManageAccountsPage,
+            WinoPage.FolderCustomizationPage => WinoPage.ManageAccountsPage,
+            WinoPage.MailCategoryManagementPage => WinoPage.ManageAccountsPage,
             WinoPage.SignatureManagementPage => WinoPage.ManageAccountsPage,
             WinoPage.ImapCalDavSettingsPage => WinoPage.ManageAccountsPage,
+            WinoPage.ProviderSelectionPage => WinoPage.ManageAccountsPage,
+            WinoPage.SpecialImapCredentialsPage => WinoPage.ManageAccountsPage,
+            WinoPage.AccountSetupProgressPage => WinoPage.ManageAccountsPage,
             WinoPage.CreateEmailTemplatePage => WinoPage.EmailTemplatesPage,
             WinoPage.CalendarSettingsPage => WinoPage.CalendarPreferenceSettingsPage,
             WinoPage.CalendarAccountSettingsPage => WinoPage.CalendarPreferenceSettingsPage,

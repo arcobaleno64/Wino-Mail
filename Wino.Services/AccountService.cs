@@ -211,9 +211,6 @@ public class AccountService : BaseDatabaseService, IAccountService
 
         Guard.IsNotNull(token);
 
-        // Enable calendar access since new token includes calendar scopes
-        account.IsCalendarAccessGranted = true;
-
         await UpdateAccountAsync(account);
     }
 
@@ -240,8 +237,39 @@ public class AccountService : BaseDatabaseService, IAccountService
         return accounts;
     }
 
+    public async Task<bool> AccountNameExistsAsync(string name, Guid? excludedAccountId = null)
+    {
+        var normalizedName = name?.Trim();
+
+        if (string.IsNullOrWhiteSpace(normalizedName))
+            return false;
+
+        var accounts = await Connection.Table<MailAccount>().ToListAsync().ConfigureAwait(false);
+
+        return accounts.Any(account =>
+            account.Id != excludedAccountId &&
+            string.Equals(account.Name?.Trim(), normalizedName, StringComparison.OrdinalIgnoreCase));
+    }
+
+    public async Task<bool> AccountAddressExistsAsync(string address, Guid? excludedAccountId = null)
+    {
+        var normalizedAddress = address?.Trim();
+
+        if (string.IsNullOrWhiteSpace(normalizedAddress))
+            return false;
+
+        var accounts = await Connection.Table<MailAccount>().ToListAsync().ConfigureAwait(false);
+
+        return accounts.Any(account =>
+            account.Id != excludedAccountId &&
+            string.Equals(account.Address?.Trim(), normalizedAddress, StringComparison.OrdinalIgnoreCase));
+    }
+
     public async Task CreateRootAliasAsync(Guid accountId, string address)
     {
+        if (string.IsNullOrWhiteSpace(address))
+            return;
+
         var rootAlias = new MailAccountAlias()
         {
             AccountId = accountId,
@@ -475,7 +503,7 @@ public class AccountService : BaseDatabaseService, IAccountService
 
     public async Task UpdateAccountCustomServerInformationAsync(CustomServerInformation customServerInformation)
     {
-        await Connection.UpdateAsync(customServerInformation, typeof(CustomServerInformation)).ConfigureAwait(false);
+        await Connection.InsertOrReplaceAsync(customServerInformation, typeof(CustomServerInformation)).ConfigureAwait(false);
     }
 
     public async Task UpdateAccountAliasesAsync(Guid accountId, List<MailAccountAlias> aliases)
@@ -538,6 +566,26 @@ public class AccountService : BaseDatabaseService, IAccountService
             }
         }
 
+        if (localAliases.Count == 0 && !string.IsNullOrWhiteSpace(account.Address))
+        {
+            var fallbackAddress = account.Address.Trim();
+            var fallbackAlias = new MailAccountAlias()
+            {
+                AccountId = account.Id,
+                AliasAddress = fallbackAddress,
+                IsPrimary = true,
+                IsRootAlias = true,
+                IsVerified = true,
+                ReplyToAddress = fallbackAddress,
+                Id = Guid.NewGuid(),
+                Source = AliasSource.ProviderDiscovered,
+                SendCapability = AliasSendCapability.Confirmed
+            };
+
+            await Connection.InsertAsync(fallbackAlias, typeof(MailAccountAlias)).ConfigureAwait(false);
+            localAliases.Add(fallbackAlias);
+        }
+
         // Make sure there is only 1 root alias and 1 primary alias selected.
 
         bool shouldUpdatePrimary = localAliases.Count(a => a.IsPrimary) != 1;
@@ -589,6 +637,17 @@ public class AccountService : BaseDatabaseService, IAccountService
     public async Task CreateAccountAsync(MailAccount account, CustomServerInformation customServerInformation)
     {
         Guard.IsNotNull(account);
+
+        if (await AccountNameExistsAsync(account.Name).ConfigureAwait(false))
+            throw new InvalidOperationException(Translator.DialogMessage_AccountNameExistsMessage);
+
+        if (await AccountAddressExistsAsync(account.Address).ConfigureAwait(false))
+            throw new InvalidOperationException(Translator.DialogMessage_AccountAddressExistsMessage);
+
+        if (!account.CreatedAt.HasValue)
+        {
+            account.CreatedAt = DateTime.UtcNow;
+        }
 
         var accountCount = await Connection.Table<MailAccount>().CountAsync();
 

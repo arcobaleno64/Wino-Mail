@@ -20,6 +20,7 @@ using Wino.Core.Domain.Models.MailItem;
 using Wino.Core.Domain.Models.Synchronization;
 using Wino.Core.Requests.Bundles;
 using Wino.Core.Requests.Calendar;
+using Wino.Core.Requests.Category;
 using Wino.Core.Requests.Folder;
 using Wino.Core.Requests.Mail;
 using Wino.Messaging.UI;
@@ -63,6 +64,7 @@ public abstract class WinoSynchronizer<TBaseRequest, TMessageType, TCalendarEven
     /// Only available for Gmail right now.
     /// </summary>
     protected virtual Task SynchronizeAliasesAsync() => Task.CompletedTask;
+    protected virtual Task SynchronizeCategoriesAsync(CancellationToken cancellationToken = default) => Task.CompletedTask;
 
     /// <summary>
     /// Queues all mail ids for initial synchronization for a specific folder.
@@ -138,9 +140,10 @@ public abstract class WinoSynchronizer<TBaseRequest, TMessageType, TCalendarEven
             PendingSynchronizationRequest.Add(options, newCancellationTokenSource);
             activeSynchronizationCancellationToken = newCancellationTokenSource.Token;
 
-            // ImapSynchronizer will send this type when an Idle client receives a notification of changes.
-            // We should not execute requests in this case.
-            bool shouldExecuteRequests = options.Type != MailSynchronizationType.IMAPIdle;
+            // Only explicit ExecuteRequests runs are allowed to drain the queued request list.
+            // Other sync types (for example the follow-up FoldersOnly refresh after folder actions)
+            // may be queued alongside ExecuteRequests and must not replay the same operations.
+            bool shouldExecuteRequests = options.Type == MailSynchronizationType.ExecuteRequests;
 
             bool shouldDelayExecution = false;
             int maxExecutionDelay = 0;
@@ -158,11 +161,11 @@ public abstract class WinoSynchronizer<TBaseRequest, TMessageType, TCalendarEven
 
                 foreach (var group in keys)
                 {
-                    var key = group.Key;
+                    var firstRequest = group.FirstOrDefault();
 
-                    if (key is MailSynchronizerOperation mailSynchronizerOperation)
+                    if (firstRequest is IMailActionRequest mailActionRequest)
                     {
-                        switch (mailSynchronizerOperation)
+                        switch (mailActionRequest.Operation)
                         {
                             case MailSynchronizerOperation.MarkRead:
                                 nativeRequests.AddRange(MarkRead(new BatchMarkReadRequest(group.Cast<MarkReadRequest>())));
@@ -194,13 +197,16 @@ public abstract class WinoSynchronizer<TBaseRequest, TMessageType, TCalendarEven
                             case MailSynchronizerOperation.Archive:
                                 nativeRequests.AddRange(Archive(new BatchArchiveRequest(group.Cast<ArchiveRequest>())));
                                 break;
+                            case MailSynchronizerOperation.UpdateCategories:
+                                nativeRequests.AddRange(UpdateCategories(new BatchMailCategoryAssignmentRequest(group.Cast<MailCategoryAssignmentRequest>())));
+                                break;
                             default:
                                 break;
                         }
                     }
-                    else if (key is FolderSynchronizerOperation folderSynchronizerOperation)
+                    else if (firstRequest is IFolderActionRequest folderActionRequest)
                     {
-                        switch (folderSynchronizerOperation)
+                        switch (folderActionRequest.Operation)
                         {
                             case FolderSynchronizerOperation.RenameFolder:
                                 nativeRequests.AddRange(RenameFolder(group.ElementAt(0) as RenameFolderRequest));
@@ -216,6 +222,26 @@ public abstract class WinoSynchronizer<TBaseRequest, TMessageType, TCalendarEven
                                 break;
                             case FolderSynchronizerOperation.CreateSubFolder:
                                 nativeRequests.AddRange(CreateSubFolder(group.ElementAt(0) as CreateSubFolderRequest));
+                                break;
+                            case FolderSynchronizerOperation.CreateRootFolder:
+                                nativeRequests.AddRange(CreateRootFolder(group.ElementAt(0) as CreateRootFolderRequest));
+                                break;
+                            default:
+                                break;
+                        }
+                    }
+                    else if (firstRequest is ICategoryActionRequest categoryActionRequest)
+                    {
+                        switch (categoryActionRequest.Operation)
+                        {
+                            case CategorySynchronizerOperation.CreateCategory:
+                                nativeRequests.AddRange(CreateCategory(group.ElementAt(0) as MailCategoryCreateRequest));
+                                break;
+                            case CategorySynchronizerOperation.UpdateCategory:
+                                nativeRequests.AddRange(UpdateCategory(group.ElementAt(0) as MailCategoryUpdateRequest));
+                                break;
+                            case CategorySynchronizerOperation.DeleteCategory:
+                                nativeRequests.AddRange(DeleteCategory(group.ElementAt(0) as MailCategoryDeleteRequest));
                                 break;
                             default:
                                 break;
@@ -318,6 +344,30 @@ public abstract class WinoSynchronizer<TBaseRequest, TMessageType, TCalendarEven
                     Log.Error(ex, "Failed to update aliases for {Name}", Account.Name);
 
                     CaptureSynchronizationIssue(SynchronizationIssue.FromException(ex, "AliasSync"));
+                    return FinalizeMailResult(MailSynchronizationResult.Failed(ex));
+                }
+            }
+
+            // Category definition sync.
+            if (options.Type == MailSynchronizationType.Categories)
+            {
+                if (!Account.IsCategorySyncSupported) return MailSynchronizationResult.Empty;
+
+                try
+                {
+                    await SynchronizeCategoriesAsync(activeSynchronizationCancellationToken);
+
+                    return FinalizeMailResult(MailSynchronizationResult.Empty);
+                }
+                catch (AuthenticationAttentionException)
+                {
+                    throw;
+                }
+                catch (Exception ex)
+                {
+                    Log.Error(ex, "Failed to update categories for {Name}", Account.Name);
+
+                    CaptureSynchronizationIssue(SynchronizationIssue.FromException(ex, "CategorySync"));
                     return FinalizeMailResult(MailSynchronizationResult.Failed(ex));
                 }
             }
@@ -526,6 +576,16 @@ public abstract class WinoSynchronizer<TBaseRequest, TMessageType, TCalendarEven
     /// <returns>New synchronization options with minimal HTTP effort.</returns>
     private MailSynchronizationOptions GetSynchronizationOptionsAfterRequestExecution(List<IRequestBase> requests, Guid existingSynchronizationId)
     {
+        if (requests.All(a => a is ICategoryActionRequest or MailCategoryAssignmentRequest))
+        {
+            return new MailSynchronizationOptions
+            {
+                AccountId = Account.Id,
+                Id = existingSynchronizationId,
+                Type = MailSynchronizationType.FoldersOnly
+            };
+        }
+
         List<Guid> synchronizationFolderIds = requests
                 .Where(a => a is ICustomFolderSynchronizationRequest)
                 .Cast<ICustomFolderSynchronizationRequest>()
@@ -602,6 +662,11 @@ public abstract class WinoSynchronizer<TBaseRequest, TMessageType, TCalendarEven
     public virtual List<IRequestBundle<TBaseRequest>> MarkFolderAsRead(MarkFolderAsReadRequest request) => throw new NotSupportedException(string.Format(Translator.Exception_UnsupportedSynchronizerOperation, this.GetType()));
     public virtual List<IRequestBundle<TBaseRequest>> DeleteFolder(DeleteFolderRequest request) => throw new NotSupportedException(string.Format(Translator.Exception_UnsupportedSynchronizerOperation, this.GetType()));
     public virtual List<IRequestBundle<TBaseRequest>> CreateSubFolder(CreateSubFolderRequest request) => throw new NotSupportedException(string.Format(Translator.Exception_UnsupportedSynchronizerOperation, this.GetType()));
+    public virtual List<IRequestBundle<TBaseRequest>> CreateRootFolder(CreateRootFolderRequest request) => throw new NotSupportedException(string.Format(Translator.Exception_UnsupportedSynchronizerOperation, this.GetType()));
+    public virtual List<IRequestBundle<TBaseRequest>> UpdateCategories(BatchMailCategoryAssignmentRequest request) => throw new NotSupportedException(string.Format(Translator.Exception_UnsupportedSynchronizerOperation, this.GetType()));
+    public virtual List<IRequestBundle<TBaseRequest>> CreateCategory(MailCategoryCreateRequest request) => throw new NotSupportedException(string.Format(Translator.Exception_UnsupportedSynchronizerOperation, this.GetType()));
+    public virtual List<IRequestBundle<TBaseRequest>> UpdateCategory(MailCategoryUpdateRequest request) => throw new NotSupportedException(string.Format(Translator.Exception_UnsupportedSynchronizerOperation, this.GetType()));
+    public virtual List<IRequestBundle<TBaseRequest>> DeleteCategory(MailCategoryDeleteRequest request) => throw new NotSupportedException(string.Format(Translator.Exception_UnsupportedSynchronizerOperation, this.GetType()));
 
     #endregion
 

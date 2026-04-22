@@ -5,6 +5,7 @@ using System.Threading.Tasks;
 using CommunityToolkit.Mvvm.Input;
 using CommunityToolkit.Mvvm.Messaging;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.UI.Windowing;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
 using Windows.UI;
@@ -20,8 +21,10 @@ using Wino.Mail.WinUI.Helpers;
 using Wino.Mail.WinUI.Interfaces;
 using Wino.Mail.WinUI.Models;
 using Wino.Mail.WinUI.Views;
+using Wino.Messaging.Client.Mails;
 using Wino.Messaging.Client.Shell;
 using Wino.Messaging.UI;
+using Wino.Views.Mail;
 using WinUIEx;
 
 namespace Wino.Mail.WinUI;
@@ -356,12 +359,16 @@ public sealed partial class ShellWindow : WindowEx, IWinoShellWindow,
         SynchronizeTitleBarSearchBox();
     }
 
-    private void OnAppWindowClosing(object sender, Microsoft.UI.Windowing.AppWindowClosingEventArgs e)
+    private async void OnAppWindowClosing(object sender, AppWindowClosingEventArgs e)
     {
         if (_allowClose || (Application.Current as App)?.IsExiting == true)
             return;
 
         e.Cancel = true;
+
+        if (!await PrepareMailModeForHideAsync())
+            return;
+
         var windowManager = WinoApplication.Current.Services.GetService<IWinoWindowManager>();
         windowManager?.HideWindow(this);
     }
@@ -396,6 +403,20 @@ public sealed partial class ShellWindow : WindowEx, IWinoShellWindow,
 
         WindowCleanupHelper.CleanupFrame(MainShellFrame);
         UnregisterRecipients();
+    }
+
+    private async Task<bool> PrepareMailModeForHideAsync()
+    {
+        if (MainShellFrame.Content is not WinoAppShell shellPage)
+            return true;
+
+        if (shellPage.GetShellFrame().Content is not MailListPage mailListPage)
+            return true;
+
+        await mailListPage.ViewModel.MailCollection.UnselectAllAsync();
+        WeakReferenceMessenger.Default.Send(new DisposeRenderingFrameRequested());
+
+        return true;
     }
 
     private void RegisterRecipients()

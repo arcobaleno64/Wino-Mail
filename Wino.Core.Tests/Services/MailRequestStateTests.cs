@@ -13,6 +13,8 @@ public sealed class MailRequestStateTests
     [Fact]
     public void MarkReadRequest_RevertUiChanges_RestoresOriginalReadState()
     {
+        WeakReferenceMessenger.Default.Reset();
+
         var mailCopy = CreateMailCopy(isRead: false, isFlagged: false);
         var request = new MarkReadRequest(mailCopy, IsRead: true);
         var recipient = new MailRequestRecipient();
@@ -27,20 +29,23 @@ public sealed class MailRequestStateTests
             request.RevertUIChanges();
 
             mailCopy.IsRead.Should().BeFalse();
-            recipient.Updated.Should().HaveCount(2);
-            recipient.Updated[0].Source.Should().Be(EntityUpdateSource.ClientUpdated);
-            recipient.Updated[1].Source.Should().Be(EntityUpdateSource.ClientReverted);
-            recipient.Updated[1].UpdatedMail.IsRead.Should().BeFalse();
+            recipient.StateUpdates.Should().HaveCount(2);
+            recipient.StateUpdates[0].Source.Should().Be(EntityUpdateSource.ClientUpdated);
+            recipient.StateUpdates[1].Source.Should().Be(EntityUpdateSource.ClientReverted);
+            recipient.StateUpdates[1].UpdatedState.IsRead.Should().BeFalse();
         }
         finally
         {
             WeakReferenceMessenger.Default.UnregisterAll(recipient);
+            WeakReferenceMessenger.Default.Reset();
         }
     }
 
     [Fact]
     public void ChangeFlagRequest_RevertUiChanges_RestoresOriginalFlagState()
     {
+        WeakReferenceMessenger.Default.Reset();
+
         var mailCopy = CreateMailCopy(isRead: true, isFlagged: false);
         var request = new ChangeFlagRequest(mailCopy, IsFlagged: true);
         var recipient = new MailRequestRecipient();
@@ -55,14 +60,15 @@ public sealed class MailRequestStateTests
             request.RevertUIChanges();
 
             mailCopy.IsFlagged.Should().BeFalse();
-            recipient.Updated.Should().HaveCount(2);
-            recipient.Updated[0].Source.Should().Be(EntityUpdateSource.ClientUpdated);
-            recipient.Updated[1].Source.Should().Be(EntityUpdateSource.ClientReverted);
-            recipient.Updated[1].UpdatedMail.IsFlagged.Should().BeFalse();
+            recipient.StateUpdates.Should().HaveCount(2);
+            recipient.StateUpdates[0].Source.Should().Be(EntityUpdateSource.ClientUpdated);
+            recipient.StateUpdates[1].Source.Should().Be(EntityUpdateSource.ClientReverted);
+            recipient.StateUpdates[1].UpdatedState.IsFlagged.Should().BeFalse();
         }
         finally
         {
             WeakReferenceMessenger.Default.UnregisterAll(recipient);
+            WeakReferenceMessenger.Default.Reset();
         }
     }
 
@@ -76,10 +82,10 @@ public sealed class MailRequestStateTests
             IsFlagged = isFlagged
         };
 
-    internal sealed class MailRequestRecipient : IRecipient<MailUpdatedMessage>
+    internal sealed class MailRequestRecipient : IRecipient<MailStateUpdatedMessage>
     {
-        public List<MailUpdatedMessage> Updated { get; } = [];
+        public List<MailStateUpdatedMessage> StateUpdates { get; } = [];
 
-        public void Receive(MailUpdatedMessage message) => Updated.Add(message);
+        public void Receive(MailStateUpdatedMessage message) => StateUpdates.Add(message);
     }
 }

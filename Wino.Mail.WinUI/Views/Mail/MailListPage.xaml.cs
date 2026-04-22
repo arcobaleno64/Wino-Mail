@@ -1,6 +1,6 @@
 using System;
-using System.Collections.ObjectModel;
 using System.Collections.Generic;
+using System.Collections.ObjectModel;
 using System.Linq;
 using System.Threading.Tasks;
 using CommunityToolkit.Mvvm.Collections;
@@ -18,6 +18,7 @@ using Windows.Foundation;
 using Windows.System;
 using Wino.Controls;
 using Wino.Core.Domain;
+using Wino.Core.Domain.Entities.Mail;
 using Wino.Core.Domain.Enums;
 using Wino.Core.Domain.Interfaces;
 using Wino.Core.Domain.Models.MailItem;
@@ -26,8 +27,8 @@ using Wino.Core.Domain.Models.Navigation;
 using Wino.Mail.ViewModels.Data;
 using Wino.Mail.ViewModels.Messages;
 using Wino.Mail.WinUI;
+using Wino.Mail.WinUI.Controls;
 using Wino.Mail.WinUI.Controls.ListView;
-using Wino.Mail.WinUI.Extensions;
 using Wino.Mail.WinUI.Helpers;
 using Wino.Mail.WinUI.Interfaces;
 using Wino.Mail.WinUI.Models;
@@ -55,7 +56,6 @@ public sealed partial class MailListPage : MailListPageAbstract,
 {
     private const double RENDERING_COLUMN_MIN_WIDTH = 375;
     private const int SELECTION_SETTLE_DELAY_MS = 120;
-    private const int RENDERING_FRAME_RELEASE_DELAY_MS = 2000;
     private int _idleNavigationRequestVersion = 0;
     private int _mailActivationRequestVersion = 0;
     private IPopoutClient? _activePopoutClient;
@@ -245,15 +245,37 @@ public sealed partial class MailListPage : MailListPageAbstract,
 
             // Default to all selected items.
             targetItems = ViewModel.MailCollection.SelectedItems;
+            var areAllPinned = targetItems.Any() && targetItems.All(item => item.MailCopy.IsPinned);
             var availableActions = ViewModel.GetAvailableMailActions(targetItems);
+            var (availableCategories, assignedCategoryIds) = await ViewModel.GetAvailableCategoriesAsync(targetItems);
 
-            if (availableActions == null || !availableActions.Any()) return;
+            var clickedAction = await GetMailContextActionFromFlyoutAsync(
+                availableActions,
+                availableCategories,
+                assignedCategoryIds,
+                areAllPinned,
+                control,
+                p.X,
+                p.Y);
 
-            var clickedOperation = await GetMailOperationFromFlyoutAsync(availableActions, control, p.X, p.Y);
+            if (clickedAction == null) return;
 
-            if (clickedOperation == null) return;
+            if (clickedAction.PinState.HasValue)
+            {
+                await ViewModel.ChangePinnedStatusAsync(targetItems, clickedAction.PinState.Value);
+                return;
+            }
 
-            var prepRequest = new MailOperationPreperationRequest(clickedOperation.Operation, targetItems.Select(a => a.MailCopy));
+            if (clickedAction.Category != null)
+            {
+                await ViewModel.ToggleCategoryAssignmentAsync(clickedAction.Category, targetItems, clickedAction.IsCategoryAssignedToAll);
+                return;
+            }
+
+            if (clickedAction.Operation == null)
+                return;
+
+            var prepRequest = new MailOperationPreperationRequest(clickedAction.Operation.Operation, targetItems.Select(a => a.MailCopy));
 
             await ViewModel.ExecuteMailOperationAsync(prepRequest);
         }
@@ -296,14 +318,90 @@ public sealed partial class MailListPage : MailListPageAbstract,
         });
     }
 
-    private async Task<MailOperationMenuItem> GetMailOperationFromFlyoutAsync(IEnumerable<MailOperationMenuItem> availableActions,
-                                                                              UIElement showAtElement,
-                                                                              double x,
-                                                                              double y)
+    private async Task<MailContextAction?> GetMailContextActionFromFlyoutAsync(
+        IEnumerable<MailOperationMenuItem> availableActions,
+        IReadOnlyList<MailCategory> availableCategories,
+        IReadOnlyCollection<Guid> assignedCategoryIds,
+        bool areAllPinned,
+        UIElement showAtElement,
+        double x,
+        double y)
     {
-        var source = new TaskCompletionSource<MailOperationMenuItem>();
+        var source = new TaskCompletionSource<MailContextAction?>();
+        var flyout = new WinoMenuFlyout();
 
-        var flyout = new MailOperationFlyout(availableActions, source);
+        foreach (var action in availableActions ?? [])
+        {
+            if (action.Operation == MailOperation.Seperator)
+            {
+                flyout.Items.Add(new MenuFlyoutSeparator());
+                continue;
+            }
+
+            var menuFlyoutItem = new MailOperationMenuFlyoutItem(action, clicked =>
+            {
+                source.TrySetResult(new MailContextAction(clicked));
+                flyout.Hide();
+            });
+
+            flyout.Items.Add(menuFlyoutItem);
+        }
+
+        if (flyout.Items.Count > 0 && flyout.Items.LastOrDefault() is not MenuFlyoutSeparator)
+        {
+            flyout.Items.Add(new MenuFlyoutSeparator());
+        }
+
+        var pinItem = new MenuFlyoutItem
+        {
+            Text = areAllPinned ? Translator.FolderOperation_Unpin : Translator.FolderOperation_Pin,
+            Icon = new WinoFontIcon { Icon = areAllPinned ? WinoIconGlyph.UnPin : WinoIconGlyph.Pin }
+        };
+
+        MenuFlyoutLanguageHelper.Apply(pinItem);
+
+        pinItem.Click += (_, _) =>
+        {
+            source.TrySetResult(new MailContextAction(!areAllPinned));
+            flyout.Hide();
+        };
+
+        flyout.Items.Add(pinItem);
+
+        if (availableCategories?.Count > 0)
+        {
+            if (flyout.Items.LastOrDefault() is not MenuFlyoutSeparator)
+            {
+                flyout.Items.Add(new MenuFlyoutSeparator());
+            }
+
+            var categorySubItem = new MenuFlyoutSubItem
+            {
+                Text = Translator.MailCategoryMenuItem
+            };
+
+            foreach (var category in availableCategories)
+            {
+                var wasAssignedToAll = assignedCategoryIds.Contains(category.Id);
+                var categoryItem = new ToggleMenuFlyoutItem
+                {
+                    Text = category.Name,
+                    IsChecked = wasAssignedToAll
+                };
+
+                categoryItem.Click += (_, _) =>
+                {
+                    source.TrySetResult(new MailContextAction(category, wasAssignedToAll));
+                    flyout.Hide();
+                };
+
+                categorySubItem.Items.Add(categoryItem);
+            }
+
+            flyout.Items.Add(categorySubItem);
+        }
+
+        flyout.Closing += (_, _) => source.TrySetResult(null);
 
         flyout.ShowAt(showAtElement, new FlyoutShowOptions()
         {
@@ -312,6 +410,17 @@ public sealed partial class MailListPage : MailListPageAbstract,
         });
 
         return await source.Task;
+    }
+
+    private sealed record MailContextAction(MailOperationMenuItem? Operation = null, MailCategory? Category = null, bool IsCategoryAssignedToAll = false, bool? PinState = null)
+    {
+        public MailContextAction(MailCategory category, bool isCategoryAssignedToAll) : this((MailOperationMenuItem?)null, category, isCategoryAssignedToAll)
+        {
+        }
+
+        public MailContextAction(bool pinState) : this((MailOperationMenuItem?)null, (MailCategory?)null, false, pinState)
+        {
+        }
     }
 
     async void IRecipient<ClearMailSelectionsRequested>.Receive(ClearMailSelectionsRequested message)
@@ -470,11 +579,6 @@ public sealed partial class MailListPage : MailListPageAbstract,
                 _ = renderingPage.ClearRenderedContentAsync();
             }
         }
-
-        await Task.Delay(RENDERING_FRAME_RELEASE_DELAY_MS);
-
-        if (requestVersion != _idleNavigationRequestVersion) return;
-        if (ViewModel.MailCollection.SelectedItemsCount != 0) return;
 
         // Ensure rendering frame actually navigates away from Compose/Rendering pages.
         // Otherwise those pages keep their messenger registrations alive.
@@ -915,10 +1019,10 @@ public sealed partial class MailListPage : MailListPageAbstract,
                 }
                 else
                 {
-                    var firstChild = clickedThread.ThreadEmails.FirstOrDefault();
-                    if (firstChild != null)
+                    var defaultSelectedChild = clickedThread.GetDefaultSelectedThreadEmail();
+                    if (defaultSelectedChild != null)
                     {
-                        firstChild.IsSelected = true;
+                        defaultSelectedChild.IsSelected = true;
                     }
                 }
 

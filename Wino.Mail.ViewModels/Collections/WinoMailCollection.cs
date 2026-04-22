@@ -12,8 +12,10 @@ using Serilog;
 using Wino.Core.Domain.Entities.Mail;
 using Wino.Core.Domain.Enums;
 using Wino.Core.Domain.Interfaces;
+using Wino.Core.Domain.Models.MailItem;
 using Wino.Mail.ViewModels.Data;
 using Wino.Messaging.Client.Mails;
+using Wino.Messaging.UI;
 
 namespace Wino.Mail.ViewModels.Collections;
 
@@ -39,6 +41,7 @@ public class WinoMailCollection : ObservableRecipient, IRecipient<SelectedItemsC
 
     public event EventHandler<MailItemViewModel> MailItemRemoved;
     public event EventHandler ItemSelectionChanged;
+    public Func<string, ThreadMailItemViewModel> ThreadItemFactory { get; set; } = static threadId => new ThreadMailItemViewModel(threadId, true);
 
     private ListItemComparer listComparer = new();
 
@@ -137,10 +140,24 @@ public class WinoMailCollection : ObservableRecipient, IRecipient<SelectedItemsC
 
     private object GetGroupingKey(IMailListItem mailItem)
     {
+        if (mailItem.IsPinned)
+            return MailListGroupKey.Pinned;
+
         if (SortingType == SortingOptionType.ReceiveDate)
-            return mailItem.CreationDate.ToLocalTime().Date;
-        else
-            return mailItem.FromName;
+            return new MailListGroupKey(false, mailItem.CreationDate.ToLocalTime().Date);
+
+        return new MailListGroupKey(false, mailItem.FromName);
+    }
+
+    private bool ShouldReinsertForChanges(MailCopyChangeFlags changedProperties)
+    {
+        if ((changedProperties & (MailCopyChangeFlags.ThreadId | MailCopyChangeFlags.IsPinned)) != 0)
+            return true;
+
+        if (SortingType == SortingOptionType.ReceiveDate)
+            return (changedProperties & MailCopyChangeFlags.CreationDate) != 0;
+
+        return (changedProperties & (MailCopyChangeFlags.FromName | MailCopyChangeFlags.FromAddress)) != 0;
     }
 
     private void UpdateUniqueIdHashes(IMailHashContainer itemContainer, bool isAdd)
@@ -457,7 +474,7 @@ public class WinoMailCollection : ObservableRecipient, IRecipient<SelectedItemsC
 
     private async Task CreateNewThreadAsync(ObservableGroup<object, IMailListItem> group, MailItemViewModel item, MailCopy addedItem)
     {
-        var threadViewModel = new ThreadMailItemViewModel(item.MailCopy.ThreadId);
+        var threadViewModel = ThreadItemFactory(item.MailCopy.ThreadId);
 
         await ExecuteUIThread(() =>
         {
@@ -606,7 +623,7 @@ public class WinoMailCollection : ObservableRecipient, IRecipient<SelectedItemsC
             }
         });
 
-        if ((appliedChanges & MailCopyChangeFlags.ThreadId) != 0)
+        if (ShouldReinsertForChanges(appliedChanges))
         {
             await ReinsertUpdatedItemAsync(updatedItem, wasSelected, existingItem.IsBusy);
             return;
@@ -710,7 +727,7 @@ public class WinoMailCollection : ObservableRecipient, IRecipient<SelectedItemsC
                 if (batchThreadLookup.TryGetValue(item.MailCopy.ThreadId, out var threadableItems) && threadableItems.Count > 1)
                 {
                     // Create a new thread with all matching items - defer UI operations
-                    var threadViewModel = new ThreadMailItemViewModel(item.MailCopy.ThreadId);
+                    var threadViewModel = ThreadItemFactory(item.MailCopy.ThreadId);
 
                     // Add emails without UI thread for now
                     foreach (var threadItem in threadableItems)
@@ -894,6 +911,131 @@ public class WinoMailCollection : ObservableRecipient, IRecipient<SelectedItemsC
             return UpdateExistingItemAsync(itemContainer, updatedMailCopy, mailUpdateSource, changedProperties);
         });
 
+    public Task UpdateMailStateAsync(MailStateChange updatedState, EntityUpdateSource mailUpdateSource)
+        => RunSerializedAsync(() =>
+        {
+            if (updatedState == null)
+                return Task.CompletedTask;
+
+            var itemContainer = GetMailItemContainer(updatedState.UniqueId);
+
+            if (itemContainer?.ItemViewModel == null)
+            {
+                return Task.CompletedTask;
+            }
+
+            return UpdateExistingMailStateAsync(itemContainer, updatedState, mailUpdateSource);
+        });
+
+    public Task UpdateMailStatesAsync(IEnumerable<MailStateChange> updatedStates, EntityUpdateSource mailUpdateSource)
+        => RunSerializedAsync(() => UpdateMailStatesInternalAsync(updatedStates, mailUpdateSource));
+
+    public Task UpdateMailCopiesAsync(IEnumerable<MailCopy> updatedMailCopies, EntityUpdateSource mailUpdateSource, MailCopyChangeFlags changedProperties = MailCopyChangeFlags.None)
+        => RunSerializedAsync(() => UpdateMailCopiesInternalAsync(updatedMailCopies, mailUpdateSource, changedProperties));
+
+    private async Task UpdateExistingMailStateAsync(MailItemContainer itemContainer, MailStateChange updatedState, EntityUpdateSource mailUpdateSource)
+    {
+        if (itemContainer?.ItemViewModel == null || updatedState == null)
+            return;
+
+        var existingItem = itemContainer.ItemViewModel;
+
+        await ExecuteUIThread(() =>
+        {
+            var appliedChanges = existingItem.ApplyStateChanges(updatedState.IsRead, updatedState.IsFlagged);
+            existingItem.IsBusy = mailUpdateSource == EntityUpdateSource.ClientUpdated;
+
+            if (itemContainer.ThreadViewModel != null && appliedChanges != MailCopyChangeFlags.None)
+            {
+                itemContainer.ThreadViewModel.NotifyMailItemUpdated(existingItem, appliedChanges);
+            }
+        });
+    }
+
+    private async Task UpdateMailStatesInternalAsync(IEnumerable<MailStateChange> updatedStates, EntityUpdateSource mailUpdateSource)
+    {
+        var updates = updatedStates?
+            .Where(x => x != null)
+            .GroupBy(x => x.UniqueId)
+            .Select(group =>
+            {
+                var updatedState = group.Last();
+                return new
+                {
+                    UpdatedState = updatedState,
+                    ItemContainer = GetMailItemContainer(updatedState.UniqueId)
+                };
+            })
+            .Where(x => x.ItemContainer?.ItemViewModel != null)
+            .ToList() ?? [];
+
+        if (updates.Count == 0)
+            return;
+
+        await ExecuteUIThread(() =>
+        {
+            foreach (var update in updates)
+            {
+                var existingItem = update.ItemContainer.ItemViewModel;
+                var appliedChanges = existingItem.ApplyStateChanges(update.UpdatedState.IsRead, update.UpdatedState.IsFlagged);
+                existingItem.IsBusy = mailUpdateSource == EntityUpdateSource.ClientUpdated;
+
+                if (update.ItemContainer.ThreadViewModel != null && appliedChanges != MailCopyChangeFlags.None)
+                {
+                    update.ItemContainer.ThreadViewModel.NotifyMailItemUpdated(existingItem, appliedChanges);
+                }
+            }
+        });
+    }
+
+    private async Task UpdateMailCopiesInternalAsync(IEnumerable<MailCopy> updatedMailCopies, EntityUpdateSource mailUpdateSource, MailCopyChangeFlags changedProperties)
+    {
+        var updates = updatedMailCopies?
+            .Where(x => x != null)
+            .GroupBy(x => x.UniqueId)
+            .Select(group =>
+            {
+                var updatedMail = group.First();
+                return new
+                {
+                    UpdatedMail = updatedMail,
+                    ItemContainer = GetMailItemContainer(updatedMail.UniqueId)
+                };
+            })
+            .Where(x => x.ItemContainer?.ItemViewModel != null)
+            .ToList() ?? [];
+
+        if (updates.Count == 0)
+            return;
+
+        if (changedProperties == MailCopyChangeFlags.None || ShouldReinsertForChanges(changedProperties))
+        {
+            foreach (var update in updates)
+            {
+                await UpdateExistingItemAsync(update.ItemContainer, update.UpdatedMail, mailUpdateSource, changedProperties);
+            }
+
+            return;
+        }
+
+        await ExecuteUIThread(() =>
+        {
+            foreach (var update in updates)
+            {
+                var updatedMail = update.UpdatedMail;
+                var itemContainer = update.ItemContainer;
+                var existingItem = itemContainer.ItemViewModel;
+                var appliedChanges = existingItem.UpdateFrom(updatedMail, changedProperties);
+                existingItem.IsBusy = mailUpdateSource == EntityUpdateSource.ClientUpdated;
+
+                if (itemContainer.ThreadViewModel != null && appliedChanges != MailCopyChangeFlags.None)
+                {
+                    itemContainer.ThreadViewModel.NotifyMailItemUpdated(existingItem, appliedChanges);
+                }
+            }
+        });
+    }
+
     public MailItemViewModel GetFirst() => AllItems.ElementAtOrDefault(0);
 
     public MailItemViewModel GetNextItem(MailCopy mailCopy)
@@ -962,7 +1104,32 @@ public class WinoMailCollection : ObservableRecipient, IRecipient<SelectedItemsC
     public Task RemoveAsync(MailCopy removeItem)
         => RunSerializedAsync(() => RemoveInternalAsync(removeItem));
 
+    public Task RemoveRangeAsync(IEnumerable<MailCopy> removeItems)
+        => RunSerializedAsync(() => RemoveRangeInternalAsync(removeItems));
+
     private async Task RemoveInternalAsync(MailCopy removeItem)
+        => await RemoveInternalAsync(removeItem, notifySelectionChanges: true);
+
+    private async Task RemoveRangeInternalAsync(IEnumerable<MailCopy> removeItems)
+    {
+        var distinctItems = removeItems?
+            .Where(x => x != null)
+            .GroupBy(x => x.UniqueId)
+            .Select(group => group.First())
+            .ToList() ?? [];
+
+        if (distinctItems.Count == 0)
+            return;
+
+        foreach (var removeItem in distinctItems)
+        {
+            await RemoveInternalAsync(removeItem, notifySelectionChanges: false);
+        }
+
+        await NotifySelectionChangesAsync();
+    }
+
+    private async Task RemoveInternalAsync(MailCopy removeItem, bool notifySelectionChanges)
     {
         var itemContainer = GetMailItemContainer(removeItem.UniqueId);
 
@@ -1029,7 +1196,10 @@ public class WinoMailCollection : ObservableRecipient, IRecipient<SelectedItemsC
             }
         }
 
-        await NotifySelectionChangesAsync();
+        if (notifySelectionChanges)
+        {
+            await NotifySelectionChangesAsync();
+        }
     }
 
     private IEnumerable<IMailListItem> AllItemsIncludingThreads
@@ -1206,4 +1376,5 @@ public class WinoMailCollection : ObservableRecipient, IRecipient<SelectedItemsC
             ItemSelectionChanged?.Invoke(this, null);
         });
     }
+
 }

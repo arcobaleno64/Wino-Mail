@@ -149,7 +149,7 @@ public partial class SettingOptionsPageViewModel : CoreBaseViewModel
         switch (account)
         {
             case AccountProviderDetailViewModel accountDetails:
-                Messenger.Send(new BreadcrumbNavigationRequested(accountDetails.Account.Name, WinoPage.AccountDetailsPage, accountDetails.Account.Id));
+                Messenger.Send(new BreadcrumbNavigationRequested(GetAccountDetailsTitle(accountDetails.Account), WinoPage.AccountDetailsPage, accountDetails.Account.Id));
                 break;
             case MergedAccountProviderDetailViewModel mergedAccount:
                 Messenger.Send(new BreadcrumbNavigationRequested(mergedAccount.MergedInbox.Name, WinoPage.MergedAccountDetailsPage, mergedAccount));
@@ -160,7 +160,10 @@ public partial class SettingOptionsPageViewModel : CoreBaseViewModel
     public void NavigateToAddAccount()
     {
         Messenger.Send(new BreadcrumbNavigationRequested(Translator.SettingsManageAccountSettings_Title, WinoPage.ManageAccountsPage));
-        Messenger.Send(new BreadcrumbNavigationRequested(Translator.WelcomeWizard_Step2Title, WinoPage.ProviderSelectionPage));
+        Messenger.Send(new BreadcrumbNavigationRequested(
+            Translator.WelcomeWizard_Step2Title,
+            WinoPage.ProviderSelectionPage,
+            ProviderSelectionNavigationContext.CreateForSettingsAddAccount()));
     }
 
     public void NavigateToManageAccounts()
@@ -200,6 +203,11 @@ public partial class SettingOptionsPageViewModel : CoreBaseViewModel
             }
         });
     }
+
+    private static string GetAccountDetailsTitle(MailAccount account)
+        => !string.IsNullOrWhiteSpace(account?.Address)
+            ? string.Format(Translator.SettingsAccountDetails_NavigationTitle, account.Address)
+            : account?.Name ?? Translator.AccountDetailsPage_Title;
 
     private void InitializeQuickSettings()
     {

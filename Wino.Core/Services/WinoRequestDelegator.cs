@@ -15,6 +15,7 @@ using Wino.Core.Domain.Models.MailItem;
 using Wino.Core.Domain.Models.Synchronization;
 using Wino.Core.Helpers;
 using Wino.Core.Requests.Calendar;
+using Wino.Core.Requests.Folder;
 using Wino.Core.Requests.Mail;
 using Wino.Messaging.Server;
 using Wino.Messaging.UI;
@@ -92,13 +93,11 @@ public class WinoRequestDelegator : IWinoRequestDelegator
         // Queue requests for each account and start synchronization.
         foreach (var accountGroup in accountIds)
         {
-            foreach (var accountRequest in accountGroup)
-            {
-                await QueueRequestAsync(accountRequest, accountGroup.Key);
-            }
+            var groupedRequests = accountGroup.Cast<IRequestBase>().ToList();
+            await QueueRequestsAsync(groupedRequests, accountGroup.Key).ConfigureAwait(false);
 
             var account = accountGroup.First().Item.AssignedAccount;
-            var actionItems = SynchronizationActionHelper.CreateActionItems(accountGroup, accountGroup.Key, account.Name);
+            var actionItems = SynchronizationActionHelper.CreateActionItems(groupedRequests, accountGroup.Key, account.Name);
 
             if (actionItems.Count > 0)
                 WeakReferenceMessenger.Default.Send(new SynchronizationActionsAdded(accountGroup.Key, account.Name, actionItems));
@@ -165,6 +164,13 @@ public class WinoRequestDelegator : IWinoRequestDelegator
         if (calendarPreparationRequest == null)
             return;
 
+        var resolvedCalendar = await ResolveCalendarAsync(calendarPreparationRequest).ConfigureAwait(false);
+        if (resolvedCalendar?.IsReadOnly == true)
+        {
+            _dialogService.ShowReadOnlyCalendarMessage();
+            return;
+        }
+
         IRequestBase request = calendarPreparationRequest.Operation switch
         {
             CalendarSynchronizerOperation.CreateEvent => await CreateCalendarEventRequestAsync(calendarPreparationRequest).ConfigureAwait(false),
@@ -200,6 +206,23 @@ public class WinoRequestDelegator : IWinoRequestDelegator
         await QueueCalendarSynchronizationAsync(accountId);
     }
 
+    public async Task ExecuteAsync(Guid accountId, IEnumerable<IRequestBase> requests)
+    {
+        var requestList = requests?.Where(a => a != null).ToList() ?? [];
+        if (requestList.Count == 0)
+            return;
+
+        await QueueRequestsAsync(requestList, accountId).ConfigureAwait(false);
+
+        await SendSyncActionsAddedAsync(requestList, accountId).ConfigureAwait(false);
+        await QueueSynchronizationAsync(accountId).ConfigureAwait(false);
+
+        if (requestList.Any(r => r is DeleteFolderRequest or CreateSubFolderRequest or CreateRootFolderRequest))
+        {
+            await QueueFoldersOnlySynchronizationAsync(accountId).ConfigureAwait(false);
+        }
+    }
+
     private async Task<IRequestBase> CreateCalendarEventRequestAsync(CalendarOperationPreparationRequest calendarPreparationRequest)
     {
         var composeResult = calendarPreparationRequest.ComposeResult
@@ -210,6 +233,25 @@ public class WinoRequestDelegator : IWinoRequestDelegator
             throw new InvalidOperationException($"Calendar {composeResult.CalendarId} could not be resolved.");
 
         return new CreateCalendarEventRequest(composeResult, assignedCalendar);
+    }
+
+    private async Task<AccountCalendar> ResolveCalendarAsync(CalendarOperationPreparationRequest calendarPreparationRequest)
+    {
+        if (calendarPreparationRequest.Operation == CalendarSynchronizerOperation.CreateEvent)
+        {
+            var calendarId = calendarPreparationRequest.ComposeResult?.CalendarId ?? Guid.Empty;
+            return calendarId == Guid.Empty
+                ? null
+                : await _calendarService.GetAccountCalendarAsync(calendarId).ConfigureAwait(false);
+        }
+
+        if (calendarPreparationRequest.CalendarItem?.AssignedCalendar is AccountCalendar assignedCalendar)
+            return assignedCalendar;
+
+        var fallbackCalendarId = calendarPreparationRequest.CalendarItem?.CalendarId ?? Guid.Empty;
+        return fallbackCalendarId == Guid.Empty
+            ? null
+            : await _calendarService.GetAccountCalendarAsync(fallbackCalendarId).ConfigureAwait(false);
     }
 
     private IRequestBase CreateDeclineRequest(CalendarItem calendarItem, string responseMessage)
@@ -227,7 +269,12 @@ public class WinoRequestDelegator : IWinoRequestDelegator
     private async Task QueueRequestAsync(IRequestBase request, Guid accountId)
     {
         // Don't trigger synchronization for individual requests - we'll trigger it once for all requests
-        await SynchronizationManager.Instance.QueueRequestAsync(request, accountId, triggerSynchronization: false);
+        await SynchronizationManager.Instance.QueueRequestAsync(request, accountId, triggerSynchronization: false).ConfigureAwait(false);
+    }
+
+    private async Task QueueRequestsAsync(IEnumerable<IRequestBase> requests, Guid accountId)
+    {
+        await SynchronizationManager.Instance.QueueRequestsAsync(requests, accountId, triggerSynchronization: false).ConfigureAwait(false);
     }
 
     private Task QueueSynchronizationAsync(Guid accountId)

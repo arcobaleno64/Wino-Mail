@@ -14,9 +14,9 @@ using Wino.Core.Domain.Models.AutoDiscovery;
 using Wino.Core.Domain.Models.Calendar;
 using Wino.Core.Domain.Models.Navigation;
 using Wino.Core.Domain.Models.Synchronization;
+using Wino.Core.Domain.Validation;
 using Wino.Core.Services;
 using Wino.Mail.ViewModels.Data;
-using Wino.Messaging.Client.Calendar;
 using Wino.Messaging.Client.Navigation;
 using Wino.Messaging.Server;
 
@@ -35,6 +35,7 @@ public partial class ImapCalDavSettingsPageViewModel : MailBaseViewModel
     private Guid _editingAccountId;
     private SpecialImapProvider _editingSpecialImapProvider;
     private TaskCompletionSource<ImapCalDavSetupResult> _completionSource;
+    private AccountCreationDialogResult _accountCreationContext;
     private bool _isCompletionFinalized;
     private bool _localOnlyInfoShown;
 
@@ -55,6 +56,12 @@ public partial class ImapCalDavSettingsPageViewModel : MailBaseViewModel
 
     [ObservableProperty]
     private string password = string.Empty;
+
+    [ObservableProperty]
+    [NotifyPropertyChangedFor(nameof(IsMailSettingsVisible))]
+    [NotifyPropertyChangedFor(nameof(IsMailPasswordInputVisible))]
+    [NotifyPropertyChangedFor(nameof(IsMailActionsVisible))]
+    private bool isMailSupportEnabled = true;
 
     [ObservableProperty]
     [NotifyPropertyChangedFor(nameof(IsCalendarModeSelectionVisible))]
@@ -135,11 +142,14 @@ public partial class ImapCalDavSettingsPageViewModel : MailBaseViewModel
     [NotifyPropertyChangedFor(nameof(IsAdvancedSetupSelected))]
     private int selectedSetupTabIndex;
 
-    public bool IsCreateMode => _pageMode == ImapCalDavSettingsPageMode.Create;
+    public bool IsCreateMode => _pageMode is ImapCalDavSettingsPageMode.Create or ImapCalDavSettingsPageMode.AddAccount;
     public bool IsEditMode => !IsCreateMode;
     public bool HasProviderHint => !string.IsNullOrWhiteSpace(ProviderHint);
     public bool IsBasicSetupSelected => SelectedSetupTabIndex == 0;
     public bool IsAdvancedSetupSelected => SelectedSetupTabIndex == 1;
+    public bool IsMailSettingsVisible => IsMailSupportEnabled;
+    public bool IsMailPasswordInputVisible => IsMailSupportEnabled;
+    public bool IsMailActionsVisible => IsMailSupportEnabled;
     public bool IsCalendarModeSelectionVisible => IsCalendarSupportEnabled;
     public bool IsCalDavSettingsVisible => IsCalendarSupportEnabled && SelectedCalendarSupportMode == ImapCalendarSupportMode.CalDav;
     public bool IsLocalCalendarModeSelected => IsCalendarSupportEnabled && SelectedCalendarSupportMode == ImapCalendarSupportMode.LocalOnly;
@@ -151,6 +161,7 @@ public partial class ImapCalDavSettingsPageViewModel : MailBaseViewModel
     public string EmailAddressHeaderText => Translator.IMAPSetupDialog_MailAddress;
     public string EmailAddressPlaceholderText => Translator.IMAPSetupDialog_MailAddressPlaceholder;
     public string PasswordHeaderText => Translator.IMAPSetupDialog_Password;
+    public string EnableMailSupportText => Translator.ProviderSelection_UseForMail;
     public string EnableCalendarSupportText => Translator.ImapCalDavSettingsPage_EnableCalendarSupport;
     public string AutoDiscoverButtonText => Translator.ImapCalDavSettingsPage_AutoDiscoverButton;
     public string BasicTabText => Translator.ImapCalDavSettingsPage_BasicTab;
@@ -284,11 +295,12 @@ public partial class ImapCalDavSettingsPageViewModel : MailBaseViewModel
         _pageMode = context.Mode;
         _editingAccountId = context.AccountId;
         _completionSource = context.CompletionSource;
+        _accountCreationContext = context.AccountCreationDialogResult;
         _isCompletionFinalized = false;
         _localOnlyInfoShown = false;
         SelectedSetupTabIndex = 0;
 
-        if (_pageMode == ImapCalDavSettingsPageMode.Create || _pageMode == ImapCalDavSettingsPageMode.Wizard)
+        if (_pageMode is ImapCalDavSettingsPageMode.Create or ImapCalDavSettingsPageMode.Wizard or ImapCalDavSettingsPageMode.AddAccount)
         {
             PageTitle = Translator.ImapCalDavSettingsPage_TitleCreate;
             ApplyCreateContextDefaults(context.AccountCreationDialogResult);
@@ -319,7 +331,7 @@ public partial class ImapCalDavSettingsPageViewModel : MailBaseViewModel
         try
         {
             var minimalSettings = BuildMinimalSettingsOrThrow();
-            await AutoDiscoverAndApplySettingsAsync(minimalSettings).ConfigureAwait(false);
+            await AutoDiscoverAndApplySettingsAsync(minimalSettings);
 
             _mailDialogService.InfoBarMessage(
                 Translator.IMAPSetupDialog_ValidationSuccess_Title,
@@ -340,6 +352,7 @@ public partial class ImapCalDavSettingsPageViewModel : MailBaseViewModel
     {
         try
         {
+            ValidateCapabilitySelection();
             await EnsureImapSettingsPreparedAsync().ConfigureAwait(false);
             var serverInformation = BuildServerInformation();
 
@@ -399,7 +412,8 @@ public partial class ImapCalDavSettingsPageViewModel : MailBaseViewModel
     {
         try
         {
-            await EnsureImapSettingsPreparedAsync().ConfigureAwait(false);
+            ValidateCapabilitySelection();
+            await EnsureImapSettingsPreparedAsync();
 
             var serverInformation = BuildServerInformation();
 
@@ -407,12 +421,26 @@ public partial class ImapCalDavSettingsPageViewModel : MailBaseViewModel
             ValidateImapSettings(serverInformation);
             ValidateCalendarModeSpecificSettings(serverInformation);
 
-            await ValidateImapConnectivityAsync(serverInformation).ConfigureAwait(false);
-            IsImapValidationSucceeded = true;
+            var excludedAccountId = _pageMode == ImapCalDavSettingsPageMode.Edit
+                ? _editingAccountId
+                : (Guid?)null;
+
+            if (!await ValidateAccountUniquenessAsync(excludedAccountId))
+                return;
+
+            if (IsMailSupportEnabled)
+            {
+                await ValidateImapConnectivityAsync(serverInformation);
+                IsImapValidationSucceeded = true;
+            }
+            else
+            {
+                IsImapValidationSucceeded = false;
+            }
 
             if (serverInformation.CalendarSupportMode == ImapCalendarSupportMode.CalDav)
             {
-                await ValidateCalDavConnectivityAsync(serverInformation).ConfigureAwait(false);
+                await ValidateCalDavConnectivityAsync(serverInformation);
                 IsCalDavValidationSucceeded = true;
             }
             else
@@ -426,13 +454,19 @@ public partial class ImapCalDavSettingsPageViewModel : MailBaseViewModel
                 return;
             }
 
+            if (_pageMode == ImapCalDavSettingsPageMode.AddAccount)
+            {
+                CompleteAddAccountFlow(serverInformation);
+                return;
+            }
+
             if (_pageMode == ImapCalDavSettingsPageMode.Create)
             {
                 CompleteCreateFlow(serverInformation);
                 return;
             }
 
-            await SaveEditFlowAsync(serverInformation).ConfigureAwait(false);
+            await SaveEditFlowAsync(serverInformation);
         }
         catch (Exception ex)
         {
@@ -456,6 +490,12 @@ public partial class ImapCalDavSettingsPageViewModel : MailBaseViewModel
     }
 
     private void CompleteWizardFlow(CustomServerInformation serverInformation)
+        => ContinueAccountCreationFlow(serverInformation);
+
+    private void CompleteAddAccountFlow(CustomServerInformation serverInformation)
+        => ContinueAccountCreationFlow(serverInformation);
+
+    private void ContinueAccountCreationFlow(CustomServerInformation serverInformation)
     {
         serverInformation.Id = Guid.NewGuid();
         serverInformation.AccountId = Guid.Empty;
@@ -464,6 +504,7 @@ public partial class ImapCalDavSettingsPageViewModel : MailBaseViewModel
         {
             DisplayName = DisplayName.Trim(),
             EmailAddress = EmailAddress.Trim(),
+            IsMailAccessGranted = IsMailSupportEnabled,
             IsCalendarAccessGranted = serverInformation.CalendarSupportMode != ImapCalendarSupportMode.Disabled,
             ServerInformation = serverInformation
         };
@@ -490,6 +531,14 @@ public partial class ImapCalDavSettingsPageViewModel : MailBaseViewModel
         }
     }
 
+    partial void OnIsMailSupportEnabledChanged(bool value)
+    {
+        if (!value)
+        {
+            IsImapValidationSucceeded = false;
+        }
+    }
+
     partial void OnSelectedCalendarSupportModeChanged(ImapCalendarSupportMode value)
     {
         if (value == ImapCalendarSupportMode.LocalOnly && !_localOnlyInfoShown)
@@ -504,6 +553,31 @@ public partial class ImapCalDavSettingsPageViewModel : MailBaseViewModel
         }
     }
 
+    partial void OnEmailAddressChanged(string oldValue, string newValue)
+    {
+        var previousAddress = oldValue?.Trim() ?? string.Empty;
+        var currentAddress = newValue?.Trim() ?? string.Empty;
+
+        ApplyCredentialDefaultsForAddress(previousAddress, currentAddress);
+        ApplyManualServerDefaultsForAddress(previousAddress, currentAddress);
+
+        IsImapValidationSucceeded = false;
+        IsCalDavValidationSucceeded = false;
+    }
+
+    partial void OnPasswordChanged(string oldValue, string newValue)
+    {
+        var previousPassword = oldValue ?? string.Empty;
+        var currentPassword = newValue ?? string.Empty;
+
+        IncomingServerPassword = ReplaceIfEmptyOrMatchingPrevious(IncomingServerPassword, previousPassword, currentPassword);
+        OutgoingServerPassword = ReplaceIfEmptyOrMatchingPrevious(OutgoingServerPassword, previousPassword, currentPassword);
+        CalDavPassword = ReplaceIfEmptyOrMatchingPrevious(CalDavPassword, previousPassword, currentPassword);
+
+        IsImapValidationSucceeded = false;
+        IsCalDavValidationSucceeded = false;
+    }
+
     private async Task InitializeEditModeAsync(Guid accountId)
     {
         var account = await _accountService.GetAccountAsync(accountId);
@@ -516,6 +590,7 @@ public partial class ImapCalDavSettingsPageViewModel : MailBaseViewModel
         ApplyProviderHint(_editingSpecialImapProvider);
 
         ApplyServerInformation(account.ServerInformation);
+        IsMailSupportEnabled = account.IsMailAccessGranted;
 
         if (account.ServerInformation != null)
         {
@@ -538,12 +613,15 @@ public partial class ImapCalDavSettingsPageViewModel : MailBaseViewModel
         var normalizedEmail = !string.IsNullOrWhiteSpace(EmailAddress) && !EmailAddress.Contains('@')
             ? $"{EmailAddress}@icloud.com"
             : EmailAddress;
+        var iCloudMailboxUsername = GetICloudMailboxUsername(normalizedEmail);
 
         if (!string.IsNullOrWhiteSpace(accountCreationDialogResult?.SpecialImapProviderDetails?.SenderName))
             DisplayName = accountCreationDialogResult.SpecialImapProviderDetails.SenderName;
 
-        IsCalendarSupportEnabled = true;
-        SelectedCalendarSupportMode = ImapCalendarSupportMode.CalDav;
+        IsMailSupportEnabled = accountCreationDialogResult?.IsMailAccessGranted != false;
+        IsCalendarSupportEnabled = accountCreationDialogResult?.IsCalendarAccessGranted == true;
+        SelectedCalendarSupportMode = accountCreationDialogResult?.SpecialImapProviderDetails?.CalendarSupportMode
+            ?? (IsCalendarSupportEnabled ? ImapCalendarSupportMode.CalDav : ImapCalendarSupportMode.Disabled);
 
         var specialProvider = accountCreationDialogResult?.SpecialImapProviderDetails?.SpecialImapProvider ?? SpecialImapProvider.None;
         _editingSpecialImapProvider = specialProvider;
@@ -555,10 +633,10 @@ public partial class ImapCalDavSettingsPageViewModel : MailBaseViewModel
                 ApplySpecialProviderDefaults(
                     "imap.mail.me.com",
                     "993",
-                    normalizedEmail,
+                    iCloudMailboxUsername,
                     "smtp.mail.me.com",
                     "587",
-                    normalizedEmail,
+                    iCloudMailboxUsername,
                     Password,
                     "https://caldav.icloud.com/",
                     normalizedEmail,
@@ -610,6 +688,63 @@ public partial class ImapCalDavSettingsPageViewModel : MailBaseViewModel
         SelectedOutgoingServerAuthenticationMethodIndex = 0;
     }
 
+    private void ApplyCredentialDefaultsForAddress(string previousAddress, string currentAddress)
+    {
+        IncomingServerUsername = ReplaceIfEmptyOrMatchingPrevious(IncomingServerUsername, previousAddress, currentAddress);
+        OutgoingServerUsername = ReplaceIfEmptyOrMatchingPrevious(OutgoingServerUsername, previousAddress, currentAddress);
+        CalDavUsername = ReplaceIfEmptyOrMatchingPrevious(CalDavUsername, previousAddress, currentAddress);
+    }
+
+    private void ApplyManualServerDefaultsForAddress(string previousAddress, string currentAddress)
+    {
+        if (!MailAccountAddressValidator.TryGetDomain(currentAddress, out var currentDomain) ||
+            !MailAccountAddressValidator.IsImplicitlyResolvableHost(currentDomain))
+        {
+            return;
+        }
+
+        MailAccountAddressValidator.TryGetDomain(previousAddress, out var previousDomain);
+
+        IncomingServer = ReplaceIfEmptyOrMatchingPrevious(IncomingServer, previousDomain, currentDomain);
+        OutgoingServer = ReplaceIfEmptyOrMatchingPrevious(OutgoingServer, previousDomain, currentDomain);
+
+        if (string.IsNullOrWhiteSpace(IncomingServerPort))
+            IncomingServerPort = "993";
+
+        if (string.IsNullOrWhiteSpace(OutgoingServerPort))
+            OutgoingServerPort = "587";
+    }
+
+    private static string GetICloudMailboxUsername(string emailAddress)
+    {
+        if (string.IsNullOrWhiteSpace(emailAddress))
+            return string.Empty;
+
+        var normalizedAddress = emailAddress.Trim();
+        var atIndex = normalizedAddress.IndexOf('@');
+
+        return atIndex > 0
+            ? normalizedAddress[..atIndex]
+            : normalizedAddress;
+    }
+
+    private static string ReplaceIfEmptyOrMatchingPrevious(string currentValue, string previousValue, string replacementValue)
+    {
+        var normalizedCurrentValue = currentValue?.Trim() ?? string.Empty;
+        var normalizedPreviousValue = previousValue?.Trim() ?? string.Empty;
+        var normalizedReplacementValue = replacementValue?.Trim() ?? string.Empty;
+
+        if (string.IsNullOrWhiteSpace(normalizedReplacementValue))
+            return currentValue ?? string.Empty;
+
+        if (string.IsNullOrWhiteSpace(normalizedCurrentValue))
+            return normalizedReplacementValue;
+
+        return string.Equals(normalizedCurrentValue, normalizedPreviousValue, StringComparison.OrdinalIgnoreCase)
+            ? normalizedReplacementValue
+            : currentValue ?? string.Empty;
+    }
+
     private void ApplyServerInformation(CustomServerInformation serverInformation)
     {
         if (serverInformation == null)
@@ -647,6 +782,9 @@ public partial class ImapCalDavSettingsPageViewModel : MailBaseViewModel
 
     private async Task EnsureImapSettingsPreparedAsync()
     {
+        if (!IsMailSupportEnabled)
+            return;
+
         if (HasCompleteImapSettings())
             return;
 
@@ -654,7 +792,7 @@ public partial class ImapCalDavSettingsPageViewModel : MailBaseViewModel
             return;
 
         var minimalSettings = BuildMinimalSettingsOrThrow();
-        await AutoDiscoverAndApplySettingsAsync(minimalSettings).ConfigureAwait(false);
+        await AutoDiscoverAndApplySettingsAsync(minimalSettings);
 
         if (!HasCompleteImapSettings())
             throw new InvalidOperationException(Translator.Exception_ImapAutoDiscoveryFailed);
@@ -676,22 +814,25 @@ public partial class ImapCalDavSettingsPageViewModel : MailBaseViewModel
         if (serverInformation == null)
             throw new InvalidOperationException(Translator.Exception_ImapAutoDiscoveryFailed);
 
-        ApplyServerInformation(serverInformation);
-
-        if (IsCalendarSupportEnabled && SelectedCalendarSupportMode == ImapCalendarSupportMode.CalDav)
+        await ExecuteUIThread(async () =>
         {
-            var discoveredCalDavUri = await _autoDiscoveryService.DiscoverCalDavServiceUriAsync(minimalSettings.Email).ConfigureAwait(false);
-            if (discoveredCalDavUri != null)
+            ApplyServerInformation(serverInformation);
+
+            if (IsCalendarSupportEnabled && SelectedCalendarSupportMode == ImapCalendarSupportMode.CalDav)
             {
-                CalDavServiceUrl = discoveredCalDavUri.ToString();
+                var discoveredCalDavUri = await _autoDiscoveryService.DiscoverCalDavServiceUriAsync(minimalSettings.Email);
+                if (discoveredCalDavUri != null)
+                {
+                    CalDavServiceUrl = discoveredCalDavUri.ToString();
+                }
+
+                if (string.IsNullOrWhiteSpace(CalDavUsername))
+                    CalDavUsername = minimalSettings.Email;
+
+                if (string.IsNullOrWhiteSpace(CalDavPassword))
+                    CalDavPassword = minimalSettings.Password;
             }
-
-            if (string.IsNullOrWhiteSpace(CalDavUsername))
-                CalDavUsername = minimalSettings.Email;
-
-            if (string.IsNullOrWhiteSpace(CalDavPassword))
-                CalDavPassword = minimalSettings.Password;
-        }
+        });
     }
     private async Task ValidateImapConnectivityAsync(CustomServerInformation serverInformation)
     {
@@ -754,6 +895,7 @@ public partial class ImapCalDavSettingsPageViewModel : MailBaseViewModel
         {
             DisplayName = DisplayName.Trim(),
             EmailAddress = EmailAddress.Trim(),
+            IsMailAccessGranted = IsMailSupportEnabled,
             IsCalendarAccessGranted = serverInformation.CalendarSupportMode != ImapCalendarSupportMode.Disabled,
             ServerInformation = serverInformation
         });
@@ -768,14 +910,54 @@ public partial class ImapCalDavSettingsPageViewModel : MailBaseViewModel
         Messenger.Send(new BackBreadcrumNavigationRequested());
     }
 
+    private async Task<bool> ValidateAccountUniquenessAsync(Guid? excludedAccountId)
+    {
+        var accountName = (_pageMode == ImapCalDavSettingsPageMode.Create
+                           || _pageMode == ImapCalDavSettingsPageMode.Wizard
+                           || _pageMode == ImapCalDavSettingsPageMode.AddAccount)
+            ? _accountCreationContext?.AccountName
+            : null;
+
+        if (!string.IsNullOrWhiteSpace(accountName) &&
+            await _accountService.AccountNameExistsAsync(accountName, excludedAccountId).ConfigureAwait(false))
+        {
+            _mailDialogService.InfoBarMessage(
+                Translator.DialogMessage_AccountExistsTitle,
+                Translator.DialogMessage_AccountNameExistsMessage,
+                InfoBarMessageType.Error);
+            return false;
+        }
+
+        if (await _accountService.AccountAddressExistsAsync(EmailAddress, excludedAccountId).ConfigureAwait(false))
+        {
+            _mailDialogService.InfoBarMessage(
+                Translator.DialogMessage_AccountExistsTitle,
+                Translator.DialogMessage_AccountAddressExistsMessage,
+                InfoBarMessageType.Error);
+            return false;
+        }
+
+        return true;
+    }
+
+    private static void ValidateCapabilitySelection(bool isMailEnabled, bool isCalendarEnabled)
+    {
+        if (!isMailEnabled && !isCalendarEnabled)
+            throw new InvalidOperationException(Translator.ProviderSelection_CapabilityValidationMessage);
+    }
+
+    private void ValidateCapabilitySelection()
+        => ValidateCapabilitySelection(IsMailSupportEnabled, IsCalendarSupportEnabled);
+
     private async Task SaveEditFlowAsync(CustomServerInformation serverInformation)
     {
-        var account = await _accountService.GetAccountAsync(_editingAccountId).ConfigureAwait(false);
+        var account = await _accountService.GetAccountAsync(_editingAccountId);
         if (account == null)
             throw new InvalidOperationException(Translator.Exception_NullAssignedAccount);
 
         account.SenderName = DisplayName.Trim();
         account.Address = EmailAddress.Trim();
+        account.IsMailAccessGranted = IsMailSupportEnabled;
         account.IsCalendarAccessGranted = serverInformation.CalendarSupportMode != ImapCalendarSupportMode.Disabled;
 
         serverInformation.Id = account.ServerInformation?.Id ?? Guid.NewGuid();
@@ -784,14 +966,17 @@ public partial class ImapCalDavSettingsPageViewModel : MailBaseViewModel
         account.ServerInformation = serverInformation;
         account.AttentionReason = AccountAttentionReason.None;
 
-        await _accountService.UpdateAccountCustomServerInformationAsync(serverInformation).ConfigureAwait(false);
-        await _accountService.UpdateAccountAsync(account).ConfigureAwait(false);
+        await _accountService.UpdateAccountCustomServerInformationAsync(serverInformation);
+        await _accountService.UpdateAccountAsync(account);
 
-        Messenger.Send(new NewMailSynchronizationRequested(new MailSynchronizationOptions
+        if (account.IsMailAccessGranted)
         {
-            AccountId = account.Id,
-            Type = MailSynchronizationType.FullFolders
-        }));
+            Messenger.Send(new NewMailSynchronizationRequested(new MailSynchronizationOptions
+            {
+                AccountId = account.Id,
+                Type = MailSynchronizationType.FullFolders
+            }));
+        }
 
         if (account.IsCalendarAccessGranted)
         {
@@ -877,7 +1062,7 @@ public partial class ImapCalDavSettingsPageViewModel : MailBaseViewModel
         if (string.IsNullOrWhiteSpace(EmailAddress))
             throw new InvalidOperationException(Translator.IMAPAdvancedSetupDialog_ValidationEmailRequired);
 
-        if (!EmailValidation.EmailValidator.Validate(EmailAddress.Trim()))
+        if (!MailAccountAddressValidator.IsValid(EmailAddress))
             throw new InvalidOperationException(Translator.IMAPAdvancedSetupDialog_ValidationEmailInvalid);
     }
 
@@ -886,6 +1071,9 @@ public partial class ImapCalDavSettingsPageViewModel : MailBaseViewModel
 
     private void ValidateImapSettings(CustomServerInformation serverInformation)
     {
+        if (!IsMailSupportEnabled)
+            return;
+
         ValidateIdentitySettings();
 
         if (string.IsNullOrWhiteSpace(serverInformation.IncomingServer))
@@ -954,7 +1142,7 @@ public partial class ImapCalDavSettingsPageViewModel : MailBaseViewModel
 
     private bool TryApplyKnownProviderSettingsIfNeeded(bool requireCompleteImapSettings, bool requireCompleteCalDavSettings)
     {
-        var needsImapSettings = requireCompleteImapSettings && !HasCompleteImapSettings();
+        var needsImapSettings = IsMailSupportEnabled && requireCompleteImapSettings && !HasCompleteImapSettings();
         var needsCalDavSettings = requireCompleteCalDavSettings
                                   && IsCalendarSupportEnabled
                                   && SelectedCalendarSupportMode == ImapCalendarSupportMode.CalDav
@@ -993,9 +1181,17 @@ public partial class ImapCalDavSettingsPageViewModel : MailBaseViewModel
                 SenderName = DisplayName.Trim(),
                 ProviderType = MailProviderType.IMAP4,
                 SpecialImapProvider = _editingSpecialImapProvider,
+                IsMailAccessGranted = IsMailSupportEnabled,
                 IsCalendarAccessGranted = mode != ImapCalendarSupportMode.Disabled
             },
-            new AccountCreationDialogResult(MailProviderType.IMAP4, DisplayName.Trim(), providerDetails, string.Empty));
+            new AccountCreationDialogResult(
+                MailProviderType.IMAP4,
+                DisplayName.Trim(),
+                providerDetails,
+                string.Empty,
+                _wizardContext.SelectedInitialSynchronizationRange,
+                IsMailSupportEnabled,
+                mode != ImapCalendarSupportMode.Disabled));
 
         if (serverInformation == null)
             return false;
@@ -1032,7 +1228,8 @@ public partial class ImapCalDavSettingsPageViewModel : MailBaseViewModel
                && !string.IsNullOrWhiteSpace(CalDavPassword));
 
     private bool HasCompleteImapSettings()
-        => !string.IsNullOrWhiteSpace(IncomingServer)
+        => !IsMailSupportEnabled
+           || (!string.IsNullOrWhiteSpace(IncomingServer)
            && !string.IsNullOrWhiteSpace(IncomingServerPort)
            && !string.IsNullOrWhiteSpace(IncomingServerUsername)
            && !string.IsNullOrWhiteSpace(IncomingServerPassword)
@@ -1041,7 +1238,7 @@ public partial class ImapCalDavSettingsPageViewModel : MailBaseViewModel
            && !string.IsNullOrWhiteSpace(OutgoingServerUsername)
            && !string.IsNullOrWhiteSpace(OutgoingServerPassword)
            && IsValidPort(IncomingServerPort)
-           && IsValidPort(OutgoingServerPort);
+           && IsValidPort(OutgoingServerPort));
 
     private int FindAuthenticationMethodIndex(ImapAuthenticationMethod method)
     {

@@ -79,6 +79,13 @@ public class MailAccount
     public SpecialImapProvider SpecialImapProvider { get; set; }
 
     /// <summary>
+    /// Gets or sets whether mail access is granted for this account.
+    /// When false, mail folders, aliases, compose flows, and mail synchronization are unavailable.
+    /// Default is true for legacy accounts to preserve existing behavior.
+    /// </summary>
+    public bool IsMailAccessGranted { get; set; } = true;
+
+    /// <summary>
     /// Gets or sets whether calendar access is granted for this account.
     /// When false, synchronizers will not process EventMessages or calendar invitations.
     /// Default is false for existing accounts to prevent scope issues.
@@ -113,6 +120,16 @@ public class MailAccount
     public DateTime? LastFolderStructureSyncDate { get; set; }
 
     /// <summary>
+    /// Gets or sets when the account was created in Wino.
+    /// </summary>
+    public DateTime? CreatedAt { get; set; }
+
+    /// <summary>
+    /// Gets or sets the timespan used for the account's initial mail synchronization.
+    /// </summary>
+    public InitialSynchronizationRange InitialSynchronizationRange { get; set; } = InitialSynchronizationRange.SixMonths;
+
+    /// <summary>
     /// Gets whether the account can perform ProfileInformation sync type.
     /// </summary>
     public bool IsProfileInfoSyncSupported => ProviderType == MailProviderType.Outlook || ProviderType == MailProviderType.Gmail;
@@ -121,6 +138,11 @@ public class MailAccount
     /// Gets whether the account can perform AliasInformation sync type.
     /// </summary>
     public bool IsAliasSyncSupported => ProviderType == MailProviderType.Gmail || ProviderType == MailProviderType.Outlook;
+
+    /// <summary>
+    /// Gets whether the account can perform category definition sync type.
+    /// </summary>
+    public bool IsCategorySyncSupported => ProviderType == MailProviderType.Outlook;
 
     public override string ToString() => Name;
 }

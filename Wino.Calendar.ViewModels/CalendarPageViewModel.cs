@@ -86,6 +86,7 @@ public partial class CalendarPageViewModel : CalendarBaseViewModel,
         get
         {
             if (SelectedQuickEventAccountCalendar == null ||
+                SelectedQuickEventAccountCalendar.IsReadOnly ||
                 SelectedQuickEventDate == null ||
                 string.IsNullOrWhiteSpace(EventName) ||
                 string.IsNullOrWhiteSpace(SelectedStartTimeString) ||
@@ -203,6 +204,12 @@ public partial class CalendarPageViewModel : CalendarBaseViewModel,
 
         if (DisplayDetailsCalendarItemViewModel?.CalendarItem == null)
             return;
+
+        if (DisplayDetailsCalendarItemViewModel.AssignedCalendar?.IsReadOnly == true)
+        {
+            _dialogService.ShowReadOnlyCalendarMessage();
+            return;
+        }
 
         if (DisplayDetailsCalendarItemViewModel.CalendarItem.IsRecurringParent)
         {
@@ -460,6 +467,12 @@ public partial class CalendarPageViewModel : CalendarBaseViewModel,
     [RelayCommand(AllowConcurrentExecutions = false, CanExecute = nameof(CanSaveQuickEvent))]
     private async Task SaveQuickEventAsync()
     {
+        if (SelectedQuickEventAccountCalendar?.IsReadOnly == true)
+        {
+            _dialogService.ShowReadOnlyCalendarMessage();
+            return;
+        }
+
         var startDate = IsAllDay ? SelectedQuickEventDate.Value.Date : QuickEventStartTime;
         var endDate = IsAllDay ? SelectedQuickEventDate.Value.Date.AddDays(1) : QuickEventEndTime;
         var composeResult = new CalendarEventComposeResult
@@ -553,6 +566,12 @@ public partial class CalendarPageViewModel : CalendarBaseViewModel,
             return;
         }
 
+        if (calendarItem.AssignedCalendar?.IsReadOnly == true)
+        {
+            _dialogService.ShowReadOnlyCalendarMessage();
+            return;
+        }
+
         var normalizedTargetStart = calendarItem.IsAllDayEvent
             ? targetStart.Date
             : targetStart;
@@ -615,7 +634,7 @@ public partial class CalendarPageViewModel : CalendarBaseViewModel,
         }
     }
 
-    public async Task ApplyDisplayRequestAsync(CalendarDisplayRequest request, bool forceReload = false)
+    public async Task ApplyDisplayRequestAsync(CalendarDisplayRequest request, bool forceReload = false, CalendarItemTarget pendingTarget = null)
     {
         var lifetimeVersion = CurrentPageLifetimeVersion;
         var hasLoadingLock = await WaitForCalendarLoadingLockAsync(lifetimeVersion).ConfigureAwait(false);
@@ -699,6 +718,11 @@ public partial class CalendarPageViewModel : CalendarBaseViewModel,
             await _notificationBuilder.ClearCalendarTaskbarBadgeAsync().ConfigureAwait(false);
             _isCalendarBadgeClearedForPageLifetime = true;
         }
+
+        if (loadSucceeded && pendingTarget != null && IsPageActive(lifetimeVersion))
+        {
+            await NavigateToPendingCalendarTargetAsync(pendingTarget).ConfigureAwait(false);
+        }
     }
 
     public Task ReloadCurrentVisibleRangeAsync()
@@ -724,6 +748,31 @@ public partial class CalendarPageViewModel : CalendarBaseViewModel,
     {
         ArgumentNullException.ThrowIfNull(calendarItem);
         NavigateEvent(new CalendarItemViewModel(calendarItem), CalendarEventTargetType.Single);
+    }
+
+    private async Task NavigateToPendingCalendarTargetAsync(CalendarItemTarget target)
+    {
+        CalendarItemViewModel calendarItemViewModel = null;
+
+        if (_loadedCalendarItems.TryGetValue(target.Item.Id, out var loadedCalendarItemViewModel))
+        {
+            calendarItemViewModel = loadedCalendarItemViewModel;
+        }
+        else
+        {
+            var targetItem = await _calendarService.GetCalendarItemTargetAsync(target).ConfigureAwait(false);
+            if (targetItem == null)
+                return;
+
+            targetItem.AssignedCalendar ??= AccountCalendarStateService.ActiveCalendars.FirstOrDefault(calendar => calendar.Id == targetItem.CalendarId);
+            calendarItemViewModel = new CalendarItemViewModel(targetItem);
+        }
+
+        await ExecuteUIThread(() =>
+        {
+            DisplayDetailsCalendarItemViewModel = calendarItemViewModel;
+            NavigateEvent(calendarItemViewModel, target.TargetType);
+        }).ConfigureAwait(false);
     }
 
     private async Task<List<CalendarItemViewModel>> LoadCalendarItemsAsync(DateRange loadedDateWindow, long lifetimeVersion)
@@ -800,7 +849,7 @@ public partial class CalendarPageViewModel : CalendarBaseViewModel,
     }
 
     public async void Receive(LoadCalendarMessage message)
-        => await ApplyDisplayRequestAsync(message.DisplayRequest, message.ForceReload);
+        => await ApplyDisplayRequestAsync(message.DisplayRequest, message.ForceReload, message.PendingTarget);
 
     public void Receive(CalendarSettingsUpdatedMessage message)
     {
@@ -1195,6 +1244,12 @@ public partial class CalendarPageViewModel : CalendarBaseViewModel,
         if (targetItem == null)
             return;
 
+        if (targetItem.AssignedCalendar?.IsReadOnly == true)
+        {
+            _dialogService.ShowReadOnlyCalendarMessage();
+            return;
+        }
+
         if (targetItem.IsRecurringParent)
         {
             var confirmed = await _dialogService.ShowConfirmationDialogAsync(
@@ -1221,6 +1276,12 @@ public partial class CalendarPageViewModel : CalendarBaseViewModel,
         if (targetItem == null || targetItem.ShowAs == showAs)
             return;
 
+        if (targetItem.AssignedCalendar?.IsReadOnly == true)
+        {
+            _dialogService.ShowReadOnlyCalendarMessage();
+            return;
+        }
+
         var originalItem = await _calendarService.GetCalendarItemAsync(targetItem.Id).ConfigureAwait(false);
         var attendees = await _calendarService.GetAttendeesAsync(targetItem.Id).ConfigureAwait(false);
 
@@ -1244,6 +1305,12 @@ public partial class CalendarPageViewModel : CalendarBaseViewModel,
 
         if (targetItem == null)
             return;
+
+        if (targetItem.AssignedCalendar?.IsReadOnly == true)
+        {
+            _dialogService.ShowReadOnlyCalendarMessage();
+            return;
+        }
 
         var operation = responseStatus switch
         {

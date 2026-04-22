@@ -32,6 +32,7 @@ public class MailService : BaseDatabaseService, IMailService
     private readonly IMimeFileService _mimeFileService;
     private readonly IPreferencesService _preferencesService;
     private readonly ISentMailReceiptService _sentMailReceiptService;
+    private readonly IMailCategoryService _mailCategoryService;
 
     private readonly ILogger _logger = Log.ForContext<MailService>();
 
@@ -42,7 +43,8 @@ public class MailService : BaseDatabaseService, IMailService
                        ISignatureService signatureService,
                        IMimeFileService mimeFileService,
                        IPreferencesService preferencesService,
-                       ISentMailReceiptService sentMailReceiptService) : base(databaseService)
+                       ISentMailReceiptService sentMailReceiptService,
+                       IMailCategoryService mailCategoryService) : base(databaseService)
     {
         _folderService = folderService;
         _contactService = contactService;
@@ -51,6 +53,7 @@ public class MailService : BaseDatabaseService, IMailService
         _mimeFileService = mimeFileService;
         _preferencesService = preferencesService;
         _sentMailReceiptService = sentMailReceiptService;
+        _mailCategoryService = mailCategoryService;
     }
 
     public async Task<(MailCopy draftMailCopy, string draftBase64MimeMessage)> CreateDraftAsync(Guid accountId, DraftCreationOptions draftCreationOptions)
@@ -114,14 +117,9 @@ public class MailService : BaseDatabaseService, IMailService
 
     public async Task<List<MailCopy>> GetMailsByFolderIdAsync(Guid folderId)
     {
-        var mails = await Connection.QueryAsync<MailCopy>("SELECT * FROM MailCopy WHERE FolderId = ?", folderId);
+        var mails = await Connection.QueryAsync<MailCopy>("SELECT * FROM MailCopy WHERE FolderId = ?", folderId).ConfigureAwait(false);
 
-        foreach (var mail in mails)
-        {
-            await LoadAssignedPropertiesAsync(mail).ConfigureAwait(false);
-        }
-
-        return mails;
+        return await HydrateMailCopiesAsync(mails).ConfigureAwait(false);
     }
 
     public async Task<bool> HasAccountAnyDraftAsync(Guid accountId)
@@ -138,14 +136,9 @@ public class MailService : BaseDatabaseService, IMailService
 
     public async Task<List<MailCopy>> GetUnreadMailsByFolderIdAsync(Guid folderId)
     {
-        var unreadMails = await Connection.QueryAsync<MailCopy>("SELECT * FROM MailCopy WHERE FolderId = ? AND IsRead = 0", folderId);
+        var unreadMails = await Connection.QueryAsync<MailCopy>("SELECT * FROM MailCopy WHERE FolderId = ? AND IsRead = 0", folderId).ConfigureAwait(false);
 
-        foreach (var mail in unreadMails)
-        {
-            await LoadAssignedPropertiesAsync(mail).ConfigureAwait(false);
-        }
-
-        return unreadMails;
+        return await HydrateMailCopiesAsync(unreadMails).ConfigureAwait(false);
     }
 
     public async Task<MailCopy> GetMailCopyByMessageIdAsync(Guid accountId, string messageId)
@@ -162,16 +155,15 @@ public class MailService : BaseDatabaseService, IMailService
             accountId,
             normalizedMessageId).ConfigureAwait(false);
 
-        if (mailCopy != null)
-            await LoadAssignedPropertiesAsync(mailCopy).ConfigureAwait(false);
-
-        return mailCopy;
+        return await HydrateMailCopyAsync(mailCopy).ConfigureAwait(false);
     }
 
-    private static (string Query, object[] Parameters) BuildMailFetchQuery(MailListInitializationOptions options)
+    private static (string Query, object[] Parameters) BuildMailFetchQuery(MailListInitializationOptions options, bool pinnedOnly = false)
     {
         var sql = new StringBuilder();
-        sql.Append("SELECT MailCopy.* FROM MailCopy INNER JOIN MailItemFolder ON MailCopy.FolderId = MailItemFolder.Id");
+        sql.Append(options.IsCategoryView
+            ? "SELECT DISTINCT MailCopy.* FROM MailCopy INNER JOIN MailItemFolder ON MailCopy.FolderId = MailItemFolder.Id INNER JOIN MailCategoryAssignment ON MailCopy.UniqueId = MailCategoryAssignment.MailCopyUniqueId"
+            : "SELECT MailCopy.* FROM MailCopy INNER JOIN MailItemFolder ON MailCopy.FolderId = MailItemFolder.Id");
 
         var whereClauses = new List<string>();
         var parameters = new List<object>();
@@ -180,6 +172,13 @@ public class MailService : BaseDatabaseService, IMailService
         var folderPlaceholders = string.Join(",", options.Folders.Select(_ => "?"));
         whereClauses.Add($"MailCopy.FolderId IN ({folderPlaceholders})");
         parameters.AddRange(options.Folders.Select(f => (object)f.Id));
+
+        if (options.IsCategoryView)
+        {
+            var categoryPlaceholders = string.Join(",", options.CategoryIds.Select(_ => "?"));
+            whereClauses.Add($"MailCategoryAssignment.MailCategoryId IN ({categoryPlaceholders})");
+            parameters.AddRange(options.CategoryIds.Select(a => (object)a));
+        }
 
         // Filter type
         switch (options.FilterType)
@@ -193,6 +192,11 @@ public class MailService : BaseDatabaseService, IMailService
             case FilterOptionType.Files:
                 whereClauses.Add("MailCopy.HasAttachments = 1");
                 break;
+        }
+
+        if (pinnedOnly)
+        {
+            whereClauses.Add("MailCopy.IsPinned = 1");
         }
 
         // Focused filter
@@ -228,23 +232,26 @@ public class MailService : BaseDatabaseService, IMailService
 
         // Sorting
         if (options.SortingOptionType == SortingOptionType.ReceiveDate)
-            sql.Append(" ORDER BY CreationDate DESC");
+            sql.Append(" ORDER BY IsPinned DESC, CreationDate DESC");
         else if (options.SortingOptionType == SortingOptionType.Sender)
-            sql.Append(" ORDER BY FromName ASC");
+            sql.Append(" ORDER BY IsPinned DESC, FromName ASC, CreationDate DESC");
 
         // Pagination
-        var limit = options.Take > 0 ? options.Take : ItemLoadCount;
-        sql.Append($" LIMIT {limit}");
-
-        if (options.Skip > 0)
+        if (!pinnedOnly)
         {
-            sql.Append($" OFFSET {options.Skip}");
+            var limit = options.Take > 0 ? options.Take : ItemLoadCount;
+            sql.Append($" LIMIT {limit}");
+
+            if (options.Skip > 0)
+            {
+                sql.Append($" OFFSET {options.Skip}");
+            }
         }
 
         return (sql.ToString(), parameters.ToArray());
     }
 
-    private static List<MailCopy> ApplyOptionsToPreFetchedMails(MailListInitializationOptions options)
+    private static List<MailCopy> ApplyOptionsToPreFetchedMails(MailListInitializationOptions options, bool pinnedOnly = false)
     {
         var allowedFolderIds = options.Folders.Select(f => f.Id).ToHashSet();
         var accountIdsByFolderId = options.Folders
@@ -288,6 +295,11 @@ public class MailService : BaseDatabaseService, IMailService
             query = query.Where(m => !options.ExistingUniqueIds.ContainsKey(m.UniqueId));
         }
 
+        if (pinnedOnly)
+        {
+            query = query.Where(m => m.IsPinned);
+        }
+
         query = options.DeduplicateByServerId
             ? query
                 .GroupBy(m => (ResolveMailAccountId(m, accountIdsByFolderId), ResolveServerMailId(m)))
@@ -303,16 +315,21 @@ public class MailService : BaseDatabaseService, IMailService
 
         query = options.SortingOptionType switch
         {
-            SortingOptionType.Sender => query.OrderBy(m => m.FromName).ThenByDescending(m => m.CreationDate),
-            _ => query.OrderByDescending(m => m.CreationDate)
+            SortingOptionType.Sender => query
+                .OrderByDescending(m => m.IsPinned)
+                .ThenBy(m => m.FromName)
+                .ThenByDescending(m => m.CreationDate),
+            _ => query
+                .OrderByDescending(m => m.IsPinned)
+                .ThenByDescending(m => m.CreationDate)
         };
 
-        if (options.Skip > 0)
+        if (!pinnedOnly && options.Skip > 0)
         {
             query = query.Skip(options.Skip);
         }
 
-        if (options.Take > 0)
+        if (!pinnedOnly && options.Take > 0)
         {
             query = query.Take(options.Take);
         }
@@ -334,17 +351,23 @@ public class MailService : BaseDatabaseService, IMailService
     private static string ResolveServerMailId(MailCopy mail)
         => string.IsNullOrWhiteSpace(mail?.Id) ? mail?.UniqueId.ToString("N") ?? string.Empty : mail.Id;
 
-    public async Task<List<MailCopy>> FetchMailsAsync(MailListInitializationOptions options, CancellationToken cancellationToken = default)
+    public Task<List<MailCopy>> FetchMailsAsync(MailListInitializationOptions options, CancellationToken cancellationToken = default)
+        => FetchMailsInternalAsync(options, pinnedOnly: false, cancellationToken);
+
+    public Task<List<MailCopy>> FetchPinnedMailsAsync(MailListInitializationOptions options, CancellationToken cancellationToken = default)
+        => FetchMailsInternalAsync(options, pinnedOnly: true, cancellationToken);
+
+    private async Task<List<MailCopy>> FetchMailsInternalAsync(MailListInitializationOptions options, bool pinnedOnly, CancellationToken cancellationToken = default)
     {
         List<MailCopy> mails;
 
-        if (options.PreFetchMailCopies != null)
+        if (options.PreFetchMailCopies != null && !options.IsCategoryView)
         {
-            mails = ApplyOptionsToPreFetchedMails(options);
+            mails = ApplyOptionsToPreFetchedMails(options, pinnedOnly);
         }
         else
         {
-            var (query, parameters) = BuildMailFetchQuery(options);
+            var (query, parameters) = BuildMailFetchQuery(options, pinnedOnly);
             mails = await Connection.QueryAsync<MailCopy>(query, parameters);
         }
 
@@ -398,7 +421,7 @@ public class MailService : BaseDatabaseService, IMailService
         mails.RemoveAll(m => m.AssignedAccount == null || m.AssignedFolder == null);
         await _sentMailReceiptService.PopulateReceiptStatesAsync(mails).ConfigureAwait(false);
 
-        if (!options.CreateThreads || mails.Count == 0)
+        if (!options.CreateThreads || mails.Count == 0 || options.IsCategoryView)
             return [.. mails];
 
         // 6. Expand threads: one batch query for all sibling mails across all threads.
@@ -505,6 +528,66 @@ public class MailService : BaseDatabaseService, IMailService
         }
     }
 
+    // AssignedAccount is loaded through AccountService so IMAP server information,
+    // preferences, and other account-side ignored properties are populated as well.
+    private async Task<List<MailCopy>> HydrateMailCopiesAsync(List<MailCopy> mails)
+    {
+        if (mails == null || mails.Count == 0)
+            return mails ?? [];
+
+        var folderIds = mails
+            .Select(m => m.FolderId)
+            .Distinct()
+            .ToList();
+
+        if (folderIds.Count == 0)
+            return mails;
+
+        var folders = await Task.WhenAll(folderIds.Select(id => _folderService.GetFolderAsync(id))).ConfigureAwait(false);
+        var folderCache = folders
+            .Where(f => f != null)
+            .ToDictionary(f => f.Id);
+
+        if (folderCache.Count == 0)
+            return mails;
+
+        var accountIds = folderCache.Values
+            .Select(f => f.MailAccountId)
+            .Distinct()
+            .ToHashSet();
+
+        var allAccounts = await _accountService.GetAccountsAsync().ConfigureAwait(false);
+        var accountCache = allAccounts
+            .Where(a => accountIds.Contains(a.Id))
+            .ToDictionary(a => a.Id);
+
+        var addresses = mails
+            .Where(m => !string.IsNullOrEmpty(m.FromAddress))
+            .Select(m => m.FromAddress)
+            .Distinct()
+            .ToList();
+
+        var contactCache = addresses.Count == 0
+            ? new Dictionary<string, AccountContact>()
+            : (await _contactService.GetContactsByAddressesAsync(addresses).ConfigureAwait(false))
+                .Where(c => c != null)
+                .ToDictionary(c => c.Address);
+
+        AssignPropertiesFromCaches(mails, folderCache, accountCache, contactCache);
+        await _sentMailReceiptService.PopulateReceiptStatesAsync(mails).ConfigureAwait(false);
+
+        return mails;
+    }
+
+    private async Task<MailCopy> HydrateMailCopyAsync(MailCopy mailCopy)
+    {
+        if (mailCopy == null)
+            return null;
+
+        var hydratedMails = await HydrateMailCopiesAsync([mailCopy]).ConfigureAwait(false);
+        return hydratedMails.FirstOrDefault();
+    }
+
     private async Task<List<MailCopy>> GetMailsByThreadIdsAsync(List<string> threadIds, HashSet<string> excludeMailIds)
     {
         if (threadIds?.Count == 0)
@@ -551,16 +634,31 @@ public class MailService : BaseDatabaseService, IMailService
         }
     }
 
-    private async Task<List<MailCopy>> GetMailItemsAsync(string mailCopyId)
+    private async Task<List<MailCopy>> GetMailCopiesByIdAsync(IEnumerable<string> mailCopyIds)
     {
-        var mailCopies = await Connection.Table<MailCopy>().Where(a => a.Id == mailCopyId).ToListAsync();
+        var distinctMailCopyIds = mailCopyIds?
+            .Where(a => !string.IsNullOrWhiteSpace(a))
+            .Distinct(StringComparer.Ordinal)
+            .ToList();
 
-        foreach (var mailCopy in mailCopies)
+        if (distinctMailCopyIds == null || distinctMailCopyIds.Count == 0)
+            return [];
+
+        var mailCopies = new List<MailCopy>();
+
+        const int batchSize = 200;
+
+        for (int i = 0; i < distinctMailCopyIds.Count; i += batchSize)
         {
-            await LoadAssignedPropertiesAsync(mailCopy).ConfigureAwait(false);
+            var batchIds = distinctMailCopyIds.Skip(i).Take(batchSize).ToList();
+            var placeholders = string.Join(",", batchIds.Select(_ => "?"));
+            var sql = $"SELECT * FROM MailCopy WHERE Id IN ({placeholders})";
+
+            var batch = await Connection.QueryAsync<MailCopy>(sql, batchIds.Cast<object>().ToArray()).ConfigureAwait(false);
+            mailCopies.AddRange(batch);
         }
 
-        return mailCopies;
+        return await HydrateMailCopiesAsync(mailCopies).ConfigureAwait(false);
     }
 
     private Task<AccountContact> GetSenderContactForAccountAsync(MailAccount account, string fromAddress)
@@ -587,35 +685,11 @@ public class MailService : BaseDatabaseService, IMailService
         };
     }
 
-    private async Task LoadAssignedPropertiesAsync(MailCopy mailCopy)
-    {
-        if (mailCopy == null) return;
-
-        // Load AssignedAccount, AssignedFolder and SenderContact.
-
-        var folder = await _folderService.GetFolderAsync(mailCopy.FolderId);
-
-        if (folder == null) return;
-
-        var account = await _accountService.GetAccountAsync(folder.MailAccountId);
-
-        if (account == null) return;
-
-        mailCopy.AssignedAccount = account;
-        mailCopy.AssignedFolder = folder;
-        mailCopy.SenderContact = await GetSenderContactForAccountAsync(account, mailCopy.FromAddress).ConfigureAwait(false);
-        await _sentMailReceiptService.PopulateReceiptStateAsync(mailCopy).ConfigureAwait(false);
-    }
-
     public async Task<MailCopy> GetSingleMailItemWithoutFolderAssignmentAsync(string mailCopyId)
     {
-        var mailCopy = await Connection.Table<MailCopy>().FirstOrDefaultAsync(a => a.Id == mailCopyId);
+        var mailCopy = await Connection.Table<MailCopy>().FirstOrDefaultAsync(a => a.Id == mailCopyId).ConfigureAwait(false);
 
-        if (mailCopy == null) return null;
-
-        await LoadAssignedPropertiesAsync(mailCopy).ConfigureAwait(false);
-
-        return mailCopy;
+        return await HydrateMailCopyAsync(mailCopy).ConfigureAwait(false);
     }
 
     /// <summary>
@@ -628,43 +702,32 @@ public class MailService : BaseDatabaseService, IMailService
     {
         var mailCopy = await Connection.FindWithQueryAsync<MailCopy>(
             "SELECT MailCopy.* FROM MailCopy WHERE MailCopy.Id = ?",
-            mailCopyId);
-        if (mailCopy == null) return null;
+            mailCopyId).ConfigureAwait(false);
 
-        await LoadAssignedPropertiesAsync(mailCopy).ConfigureAwait(false);
-
-        return mailCopy;
+        return await HydrateMailCopyAsync(mailCopy).ConfigureAwait(false);
     }
 
     public async Task<MailCopy> GetSingleMailItemAsync(string mailCopyId, string remoteFolderId)
     {
         var mailItem = await Connection.FindWithQueryAsync<MailCopy>(
             "SELECT MailCopy.* FROM MailCopy INNER JOIN MailItemFolder ON MailCopy.FolderId = MailItemFolder.Id WHERE MailCopy.Id = ? AND MailItemFolder.RemoteFolderId = ?",
-            mailCopyId, remoteFolderId);
+            mailCopyId, remoteFolderId).ConfigureAwait(false);
 
-        if (mailItem == null) return null;
-
-        await LoadAssignedPropertiesAsync(mailItem).ConfigureAwait(false);
-
-        return mailItem;
+        return await HydrateMailCopyAsync(mailItem).ConfigureAwait(false);
     }
 
     public async Task<MailCopy> GetSingleMailItemAsync(Guid uniqueMailId)
     {
-        var mailItem = await Connection.FindAsync<MailCopy>(uniqueMailId);
+        var mailItem = await Connection.FindAsync<MailCopy>(uniqueMailId).ConfigureAwait(false);
 
-        if (mailItem == null) return null;
-
-        await LoadAssignedPropertiesAsync(mailItem).ConfigureAwait(false);
-
-        return mailItem;
+        return await HydrateMailCopyAsync(mailItem).ConfigureAwait(false);
     }
 
     // v2
 
     public async Task DeleteMailAsync(Guid accountId, string mailCopyId)
     {
-        var allMails = await GetMailItemsAsync(mailCopyId).ConfigureAwait(false);
+        var allMails = await GetMailCopiesByIdAsync([mailCopyId]).ConfigureAwait(false);
 
         foreach (var mailItem in allMails)
         {
@@ -696,7 +759,8 @@ public class MailService : BaseDatabaseService, IMailService
 
         await Connection.InsertAsync(mailCopy, typeof(MailCopy)).ConfigureAwait(false);
 
-        ReportUIChange(new MailAddedMessage(mailCopy, EntityUpdateSource.Server));
+        var hydratedMailCopy = await HydrateMailCopyAsync(mailCopy).ConfigureAwait(false);
+        ReportUIChange(new MailAddedMessage(hydratedMailCopy, EntityUpdateSource.Server));
     }
 
     public async Task UpdateMailAsync(MailCopy mailCopy)
@@ -710,9 +774,20 @@ public class MailService : BaseDatabaseService, IMailService
 
         _logger.Debug("Updating mail {MailCopyId} with Folder {FolderId}", mailCopy.Id, mailCopy.FolderId);
 
+        var existingMailCopy = mailCopy.UniqueId != Guid.Empty
+            ? await Connection.FindAsync<MailCopy>(mailCopy.UniqueId).ConfigureAwait(false)
+            : null;
+
+        if (existingMailCopy != null)
+        {
+            // Pinning is managed locally for now, so server refreshes should not clear it.
+            mailCopy.IsPinned = existingMailCopy.IsPinned;
+        }
+
         await Connection.UpdateAsync(mailCopy, typeof(MailCopy)).ConfigureAwait(false);
 
-        ReportUIChange(new MailUpdatedMessage(mailCopy, EntityUpdateSource.Server));
+        var hydratedMailCopy = await HydrateMailCopyAsync(mailCopy).ConfigureAwait(false);
+        ReportUIChange(new MailUpdatedMessage(hydratedMailCopy, EntityUpdateSource.Server));
     }
 
     private async Task DeleteMailInternalAsync(MailCopy mailCopy, bool preserveMimeFile)
@@ -727,6 +802,7 @@ public class MailService : BaseDatabaseService, IMailService
         _logger.Debug("Deleting mail {Id} from folder {FolderName}", mailCopy.Id, mailCopy.AssignedFolder.FolderName);
 
         await Connection.DeleteAsync<MailCopy>(mailCopy.UniqueId).ConfigureAwait(false);
+        await Connection.ExecuteAsync("DELETE FROM MailCategoryAssignment WHERE MailCopyUniqueId = ?", mailCopy.UniqueId).ConfigureAwait(false);
 
         // If there are no more copies exists of the same mail, delete the MIME file as well.
         var isMailExists = await IsMailExistsAsync(mailCopy.Id).ConfigureAwait(false);
@@ -741,9 +817,62 @@ public class MailService : BaseDatabaseService, IMailService
 
     #endregion
 
-    private async Task UpdateAllMailCopiesAsync(string mailCopyId, Func<MailCopy, bool> action)
+    private async Task PersistMailCopyUpdatesAsync(IReadOnlyList<(MailCopy MailCopy, MailCopyChangeFlags ChangedProperties)> pendingUpdates)
     {
-        var mailCopies = await GetMailItemsAsync(mailCopyId);
+        if (pendingUpdates == null || pendingUpdates.Count == 0)
+            return;
+
+        await Connection.RunInTransactionAsync(connection =>
+        {
+            foreach (var (mailCopy, _) in pendingUpdates)
+            {
+                connection.Update(mailCopy, typeof(MailCopy));
+            }
+        }).ConfigureAwait(false);
+
+        var readMailUniqueIds = pendingUpdates
+            .Where(x => (x.ChangedProperties & MailCopyChangeFlags.IsRead) != 0 &&
+                        x.MailCopy?.IsRead == true &&
+                        x.MailCopy.UniqueId != Guid.Empty)
+            .Select(x => x.MailCopy.UniqueId)
+            .Distinct()
+            .ToList();
+
+        if (readMailUniqueIds.Count > 0)
+        {
+            WeakReferenceMessenger.Default.Send(new BulkMailReadStatusChanged(readMailUniqueIds));
+        }
+
+        var hydratedUpdatesByUniqueId = (await HydrateMailCopiesAsync(
+                pendingUpdates
+                    .Where(x => x.MailCopy != null)
+                    .Select(x => x.MailCopy)
+                    .GroupBy(x => x.UniqueId)
+                    .Select(group => group.First())
+                    .ToList())
+            .ConfigureAwait(false))
+            .Where(x => x != null)
+            .ToDictionary(x => x.UniqueId);
+
+        foreach (var updateGroup in pendingUpdates
+                     .Where(x => x.MailCopy != null)
+                     .GroupBy(x => x.ChangedProperties))
+        {
+            var updatedMails = updateGroup
+                .Select(x => hydratedUpdatesByUniqueId.GetValueOrDefault(x.MailCopy.UniqueId, x.MailCopy))
+                .Where(x => x != null)
+                .ToList();
+
+            if (updatedMails.Count == 0)
+                continue;
+
+            ReportUIChange(new BulkMailUpdatedMessage(updatedMails, EntityUpdateSource.Server, updateGroup.Key));
+        }
+    }
+
+    private async Task UpdateAllMailCopiesAsync(string mailCopyId, Func<MailCopy, MailCopyChangeFlags> action)
+    {
+        var mailCopies = await GetMailCopiesByIdAsync([mailCopyId]).ConfigureAwait(false);
 
         if (mailCopies == null || !mailCopies.Any())
         {
@@ -754,42 +883,142 @@ public class MailService : BaseDatabaseService, IMailService
 
         _logger.Debug("Updating {MailCopyCount} mail copies with Id {MailCopyId}", mailCopies.Count, mailCopyId);
 
+        var pendingUpdates = new List<(MailCopy MailCopy, MailCopyChangeFlags ChangedProperties)>();
+
         foreach (var mailCopy in mailCopies)
         {
-            bool shouldUpdateItem = action(mailCopy);
+            var changedProperties = action(mailCopy);
 
-            if (shouldUpdateItem)
+            if (changedProperties != MailCopyChangeFlags.None)
             {
-                await UpdateMailAsync(mailCopy).ConfigureAwait(false);
+                pendingUpdates.Add((mailCopy, changedProperties));
             }
             else
+            {
                 _logger.Debug("Skipped updating mail because it is already in the desired state.");
+            }
         }
+
+        await PersistMailCopyUpdatesAsync(pendingUpdates).ConfigureAwait(false);
     }
 
     public Task ChangeReadStatusAsync(string mailCopyId, bool isRead)
         => UpdateAllMailCopiesAsync(mailCopyId, (item) =>
         {
-            if (item.IsRead == isRead) return false;
+            if (item.IsRead == isRead) return MailCopyChangeFlags.None;
 
             item.IsRead = isRead;
-            if (isRead && item.UniqueId != Guid.Empty)
-            {
-                WeakReferenceMessenger.Default.Send(new MailReadStatusChanged(item.UniqueId));
-            }
 
-            return true;
+            return MailCopyChangeFlags.IsRead;
         });
 
     public Task ChangeFlagStatusAsync(string mailCopyId, bool isFlagged)
         => UpdateAllMailCopiesAsync(mailCopyId, (item) =>
         {
-            if (item.IsFlagged == isFlagged) return false;
+            if (item.IsFlagged == isFlagged) return MailCopyChangeFlags.None;
 
             item.IsFlagged = isFlagged;
 
-            return true;
+            return MailCopyChangeFlags.IsFlagged;
         });
+
+    public async Task ChangePinnedStatusAsync(IEnumerable<Guid> uniqueMailIds, bool isPinned)
+    {
+        var distinctUniqueIds = uniqueMailIds?
+            .Where(id => id != Guid.Empty)
+            .Distinct()
+            .ToList() ?? [];
+
+        if (distinctUniqueIds.Count == 0)
+            return;
+
+        var placeholders = string.Join(",", distinctUniqueIds.Select(_ => "?"));
+        var mailCopies = await Connection
+            .QueryAsync<MailCopy>($"SELECT * FROM MailCopy WHERE UniqueId IN ({placeholders})", distinctUniqueIds.Cast<object>().ToArray())
+            .ConfigureAwait(false);
+
+        if (mailCopies.Count == 0)
+        {
+            _logger.Warning("Changing pin status failed because there are no matching copies for {MailCopyCount} unique ids.", distinctUniqueIds.Count);
+            return;
+        }
+
+        var pendingUpdates = new List<(MailCopy MailCopy, MailCopyChangeFlags ChangedProperties)>();
+
+        foreach (var mailCopy in mailCopies)
+        {
+            if (mailCopy.IsPinned == isPinned)
+                continue;
+
+            mailCopy.IsPinned = isPinned;
+            pendingUpdates.Add((mailCopy, MailCopyChangeFlags.IsPinned));
+        }
+
+        await PersistMailCopyUpdatesAsync(pendingUpdates).ConfigureAwait(false);
+    }
+
+    public async Task ApplyMailStateUpdatesAsync(IEnumerable<MailCopyStateUpdate> updates)
+    {
+        var updateLookup = new Dictionary<string, MailCopyStateUpdate>(StringComparer.Ordinal);
+
+        foreach (var update in updates ?? [])
+        {
+            if (update == null || string.IsNullOrWhiteSpace(update.MailCopyId))
+                continue;
+
+            if (updateLookup.TryGetValue(update.MailCopyId, out var existingUpdate))
+            {
+                updateLookup[update.MailCopyId] = new MailCopyStateUpdate(
+                    update.MailCopyId,
+                    update.IsRead ?? existingUpdate.IsRead,
+                    update.IsFlagged ?? existingUpdate.IsFlagged);
+            }
+            else
+            {
+                updateLookup[update.MailCopyId] = update;
+            }
+        }
+
+        if (updateLookup.Count == 0)
+            return;
+
+        var mailCopies = await GetMailCopiesByIdAsync(updateLookup.Keys).ConfigureAwait(false);
+
+        if (mailCopies.Count == 0)
+        {
+            _logger.Warning("Applying mail state updates failed because there are no matching copies for {MailCopyCount} ids.", updateLookup.Count);
+            return;
+        }
+
+        var pendingUpdates = new List<(MailCopy MailCopy, MailCopyChangeFlags ChangedProperties)>();
+
+        foreach (var mailCopy in mailCopies)
+        {
+            if (!updateLookup.TryGetValue(mailCopy.Id, out var update))
+                continue;
+
+            var changedProperties = MailCopyChangeFlags.None;
+
+            if (update.IsRead.HasValue && mailCopy.IsRead != update.IsRead.Value)
+            {
+                mailCopy.IsRead = update.IsRead.Value;
+                changedProperties |= MailCopyChangeFlags.IsRead;
+            }
+
+            if (update.IsFlagged.HasValue && mailCopy.IsFlagged != update.IsFlagged.Value)
+            {
+                mailCopy.IsFlagged = update.IsFlagged.Value;
+                changedProperties |= MailCopyChangeFlags.IsFlagged;
+            }
+
+            if (changedProperties != MailCopyChangeFlags.None)
+            {
+                pendingUpdates.Add((mailCopy, changedProperties));
+            }
+        }
+
+        await PersistMailCopyUpdatesAsync(pendingUpdates).ConfigureAwait(false);
+    }
 
     public async Task CreateAssignmentAsync(Guid accountId, string mailCopyId, string remoteFolderId)
     {
@@ -965,6 +1194,7 @@ public class MailService : BaseDatabaseService, IMailService
             mailCopy.UniqueId = existingCopyItem.UniqueId;
 
             await UpdateMailAsync(mailCopy).ConfigureAwait(false);
+            await ReplaceMailCategoriesForPackageAsync(accountId, mailCopy, package).ConfigureAwait(false);
             await _sentMailReceiptService.TrackSentMailAsync(mailCopy, mimeMessage).ConfigureAwait(false);
             await _sentMailReceiptService.ProcessIncomingReceiptAsync(mailCopy, mimeMessage).ConfigureAwait(false);
 
@@ -975,12 +1205,13 @@ public class MailService : BaseDatabaseService, IMailService
             if (account.ProviderType != MailProviderType.Gmail)
             {
                 // Make sure there is only 1 instance left of this mail copy id.
-                var allMails = await GetMailItemsAsync(mailCopy.Id).ConfigureAwait(false);
+                var allMails = await GetMailCopiesByIdAsync([mailCopy.Id]).ConfigureAwait(false);
 
                 await DeleteMailAsync(accountId, mailCopy.Id).ConfigureAwait(false);
             }
 
             await InsertMailAsync(mailCopy).ConfigureAwait(false);
+            await ReplaceMailCategoriesForPackageAsync(accountId, mailCopy, package).ConfigureAwait(false);
             await _sentMailReceiptService.TrackSentMailAsync(mailCopy, mimeMessage).ConfigureAwait(false);
             await _sentMailReceiptService.ProcessIncomingReceiptAsync(mailCopy, mimeMessage).ConfigureAwait(false);
 
@@ -1016,6 +1247,11 @@ public class MailService : BaseDatabaseService, IMailService
 
         await _contactService.SaveAddressInformationAsync(contacts).ConfigureAwait(false);
     }
+
+    private Task ReplaceMailCategoriesForPackageAsync(Guid accountId, MailCopy mailCopy, NewMailItemPackage package)
+        => package?.CategoryNames == null
+            ? Task.CompletedTask
+            : _mailCategoryService.ReplaceMailAssignmentsAsync(accountId, mailCopy.UniqueId, package.CategoryNames);
 
     private async Task<MimeMessage> CreateDraftMimeAsync(MailAccount account, DraftCreationOptions draftCreationOptions, MailAccountAlias selectedAlias)
     {
@@ -1348,7 +1584,7 @@ public class MailService : BaseDatabaseService, IMailService
 
         var oldLocalDraftId = localDraftCopy.Id;
 
-        await LoadAssignedPropertiesAsync(localDraftCopy).ConfigureAwait(false);
+        localDraftCopy = await HydrateMailCopyAsync(localDraftCopy).ConfigureAwait(false);
 
         bool isIdChanging = localDraftCopy.Id != newMailCopyId;
 
@@ -1376,22 +1612,30 @@ public class MailService : BaseDatabaseService, IMailService
                 (shouldUpdateDraftId && item.DraftId != newDraftId))
             {
                 var oldDraftId = item.DraftId;
+                var changedProperties = MailCopyChangeFlags.None;
 
                 if (shouldUpdateDraftId)
+                {
                     item.DraftId = newDraftId;
+                    changedProperties |= MailCopyChangeFlags.DraftId;
+                }
+
                 if (shouldUpdateThreadId)
+                {
                     item.ThreadId = newThreadId;
+                    changedProperties |= MailCopyChangeFlags.ThreadId;
+                }
 
                 ReportUIChange(new DraftMapped(oldDraftId, item.DraftId));
 
-                return true;
+                return changedProperties;
             }
 
-            return false;
+            return MailCopyChangeFlags.None;
         });
     }
 
-    public Task<List<MailCopy>> GetDownloadedUnreadMailsAsync(Guid accountId, IEnumerable<string> downloadedMailCopyIds)
+    public async Task<List<MailCopy>> GetDownloadedUnreadMailsAsync(Guid accountId, IEnumerable<string> downloadedMailCopyIds)
     {
         var placeholders = string.Join(",", downloadedMailCopyIds.Select(_ => "?"));
         var sql = $"SELECT MailCopy.* FROM MailCopy INNER JOIN MailItemFolder ON MailCopy.FolderId = MailItemFolder.Id WHERE MailCopy.Id IN ({placeholders}) AND MailCopy.IsRead = ? AND MailItemFolder.MailAccountId = ? AND MailItemFolder.SpecialFolderType = ?";
@@ -1401,7 +1645,8 @@ public class MailService : BaseDatabaseService, IMailService
         parameters.Add(accountId);
         parameters.Add((int)SpecialFolderType.Inbox);
 
-        return Connection.QueryAsync<MailCopy>(sql, parameters.ToArray());
+        var mailCopies = await Connection.QueryAsync<MailCopy>(sql, parameters.ToArray()).ConfigureAwait(false);
+        return await HydrateMailCopiesAsync(mailCopies).ConfigureAwait(false);
     }
 
     public Task<MailAccount> GetMailAccountByUniqueIdAsync(Guid uniqueMailId)
@@ -1421,7 +1666,8 @@ public class MailService : BaseDatabaseService, IMailService
         var placeholders = string.Join(",", localMailIds.Select(_ => "?"));
         var sql = $"SELECT * FROM MailCopy WHERE Id IN ({placeholders})";
 
-        return await Connection.QueryAsync<MailCopy>(sql, localMailIds.Cast<object>().ToArray());
+        var mailCopies = await Connection.QueryAsync<MailCopy>(sql, localMailIds.Cast<object>().ToArray()).ConfigureAwait(false);
+        return await HydrateMailCopiesAsync(mailCopies).ConfigureAwait(false);
     }
 
     public Task<bool> IsMailExistsAsync(string mailCopyId, Guid folderId)
@@ -1537,21 +1783,7 @@ public class MailService : BaseDatabaseService, IMailService
         var mailCopies = await Connection.QueryAsync<MailCopy>(sql, mailCopyIds.Cast<object>().ToArray());
         if (mailCopies?.Count == 0) return [];
 
-        var folderIds = mailCopies.Select(m => m.FolderId).Distinct().ToList();
-        var folderTasks = folderIds.Select(id => _folderService.GetFolderAsync(id));
-        var folders = await Task.WhenAll(folderTasks).ConfigureAwait(false);
-        var folderCache = folders.Where(f => f != null).ToDictionary(f => f.Id);
-
-        var allAccounts = await _accountService.GetAccountsAsync().ConfigureAwait(false);
-        var accountCache = allAccounts.ToDictionary(a => a.Id);
-
-        var addresses = mailCopies.Where(m => !string.IsNullOrEmpty(m.FromAddress)).Select(m => m.FromAddress).Distinct().ToList();
-        var contactList = await _contactService.GetContactsByAddressesAsync(addresses).ConfigureAwait(false);
-        var contactCache = contactList.ToDictionary(c => c.Address);
-
-        AssignPropertiesFromCaches(mailCopies, folderCache, accountCache, contactCache);
-
-        return mailCopies;
+        return await HydrateMailCopiesAsync(mailCopies).ConfigureAwait(false);
     }
 
     public async Task<List<string>> AreMailsExistsAsync(IEnumerable<string> mailCopyIds)
@@ -1562,7 +1794,7 @@ public class MailService : BaseDatabaseService, IMailService
         return await Connection.QueryScalarsAsync<string>(sql, mailCopyIds.Cast<object>().ToArray());
     }
 
-    public Task<List<MailCopy>> GetMailCopiesBeforeDateAsync(Guid accountId, DateTime cutoffDateUtc)
+    public async Task<List<MailCopy>> GetMailCopiesBeforeDateAsync(Guid accountId, DateTime cutoffDateUtc)
     {
         const string query = """
                              SELECT MailCopy.*
@@ -1572,6 +1804,7 @@ public class MailService : BaseDatabaseService, IMailService
                                AND MailCopy.CreationDate < ?
                              """;
 
-        return Connection.QueryAsync<MailCopy>(query, accountId, cutoffDateUtc);
+        var mailCopies = await Connection.QueryAsync<MailCopy>(query, accountId, cutoffDateUtc).ConfigureAwait(false);
+        return await HydrateMailCopiesAsync(mailCopies).ConfigureAwait(false);
     }
 }

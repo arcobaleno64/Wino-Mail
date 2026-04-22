@@ -23,9 +23,9 @@
   <Identity
     Name="58272BurakKSE.WinoMailPreview"
     Publisher="CN=51FBDAF3-E212-4149-89A2-A2636B3BC911"
-    Version="2.0.0.0" />
+    Version="2.0.6.0" />
 
-  <mp:PhoneIdentity PhoneProductId="3879fcfb-a561-4599-9103-e0c9b35a271f" PhonePublisherId="00000000-0000-0000-0000-000000000000"/>
+  <mp:PhoneIdentity PhoneProductId="7b7e90e9-cc55-4409-9769-99b4b5ed6e9b" PhonePublisherId="00000000-0000-0000-0000-000000000000"/>
 
   <Properties>
     <DisplayName>Wino Mail</DisplayName>
@@ -97,6 +97,15 @@
 				</uap:Protocol>
 			</uap:Extension>
 
+			<!-- Share target activation -->
+			<uap:Extension Category="windows.shareTarget">
+				<uap:ShareTarget>
+					<uap:SupportedFileTypes>
+						<uap:SupportsAnyFileType />
+					</uap:SupportedFileTypes>
+				</uap:ShareTarget>
+			</uap:Extension>
+
 			<!-- File Assosication: EML -->
 			<uap:Extension Category="windows.fileTypeAssociation">
 				<uap:FileTypeAssociation Name="eml">
@@ -124,18 +133,6 @@
       </uap:VisualElements>
 
       <Extensions>
-        <desktop:Extension Category="windows.toastNotificationActivation">
-          <desktop:ToastNotificationActivation ToastActivatorCLSID="44c05d2b-aa1d-4e59-9d7d-8b4c8607cb8d" />
-        </desktop:Extension>
-
-        <com:Extension Category="windows.comServer">
-          <com:ComServer>
-            <com:ExeServer Executable="Wino.Mail.WinUI.exe" Arguments="----AppNotificationActivated:" DisplayName="Calendar toast activator">
-              <com:Class Id="44c05d2b-aa1d-4e59-9d7d-8b4c8607cb8d" DisplayName="Calendar toast activator"/>
-            </com:ExeServer>
-          </com:ComServer>
-        </com:Extension>
-
         <uap:Extension Category="windows.protocol">
           <uap:Protocol Name="webcal">
             <uap:DisplayName>Calendar Protocol</uap:DisplayName>

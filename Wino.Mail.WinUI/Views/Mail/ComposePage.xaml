@@ -35,7 +35,7 @@
                 Background="Transparent"
                 ColumnSpacing="3">
                 <Grid.ContextFlyout>
-                    <MenuFlyout>
+                    <coreControls:WinoMenuFlyout>
                         <MenuFlyoutItem
                             Click="OpenAttachment_Click"
                             CommandParameter="{x:Bind}"
@@ -44,7 +44,7 @@
                             Click="SaveAttachment_Click"
                             CommandParameter="{x:Bind}"
                             Text="{x:Bind domain:Translator.Buttons_Save}" />
-                    </MenuFlyout>
+                    </coreControls:WinoMenuFlyout>
                 </Grid.ContextFlyout>
                 <ToolTipService.ToolTip>
                     <ToolTip Content="{x:Bind FileName}" />
@@ -162,12 +162,12 @@
                             </AppBarButton>
                             <AppBarToggleButton
                                 x:Name="ComposeAiActionsToggleButton"
-                                Checked="ComposeAiActionsToggleButton_Checked"
                                 MinWidth="40"
                                 HorizontalContentAlignment="Center"
+                                Checked="ComposeAiActionsToggleButton_Checked"
                                 LabelPosition="Collapsed"
-                                Visibility="{x:Bind GetAiActionsToggleVisibility(ViewModel.PreferencesService.IsAiActionsPanelHidden), Mode=OneWay}"
-                                ToolTipService.ToolTip="{x:Bind domain:Translator.Composer_AiActions}">
+                                ToolTipService.ToolTip="{x:Bind domain:Translator.Composer_AiActions}"
+                                Visibility="{x:Bind GetAiActionsToggleVisibility(ViewModel.PreferencesService.IsAiActionsPanelHidden), Mode=OneWay}">
                                 <AppBarToggleButton.Icon>
                                     <FontIcon FontFamily="{StaticResource SymbolThemeFontFamily}" Glyph="&#xE945;" />
                                 </AppBarToggleButton.Icon>

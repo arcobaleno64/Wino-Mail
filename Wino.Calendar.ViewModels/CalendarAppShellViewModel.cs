@@ -169,6 +169,7 @@ public partial class CalendarAppShellViewModel : CalendarBaseViewModel,
 
         var activationContext = parameters as ShellModeActivationContext;
         var shouldRunStartupFlows = activationContext?.IsInitialActivation ?? true;
+        var navigationArgs = activationContext?.Parameter as CalendarPageNavigationArgs;
 
         PreferencesService.PreferenceChanged -= PreferencesServiceChanged;
         PreferencesService.PreferenceChanged += PreferencesServiceChanged;
@@ -178,7 +179,14 @@ public partial class CalendarAppShellViewModel : CalendarBaseViewModel,
         await InitializeAccountCalendarsAsync();
         ValidateConfiguredNewEventCalendar();
 
-        TodayClicked();
+        if (navigationArgs != null)
+        {
+            NavigationService.Navigate(WinoPage.CalendarPage, navigationArgs);
+        }
+        else if (shouldRunStartupFlows || _calendarPageViewModel.CurrentVisibleRange == null)
+        {
+            TodayClicked();
+        }
     }
 
     public override void OnNavigatedFrom(NavigationMode mode, object parameters)
@@ -291,6 +299,9 @@ public partial class CalendarAppShellViewModel : CalendarBaseViewModel,
 
         foreach (var account in accounts)
         {
+            if (!GroupedAccountCalendarViewModel.SupportsCalendar(account))
+                continue;
+
             var accountCalendars = await _calendarService.GetAccountCalendarsAsync(account.Id).ConfigureAwait(false);
             var calendarViewModels = accountCalendars.Select(calendar => new AccountCalendarViewModel(account, calendar)).ToList();
             var groupedAccountCalendarViewModel = new GroupedAccountCalendarViewModel(account, calendarViewModels);

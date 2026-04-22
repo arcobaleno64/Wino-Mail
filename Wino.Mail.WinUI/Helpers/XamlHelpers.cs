@@ -16,6 +16,7 @@ using Wino.Core.Domain;
 using Wino.Core.Domain.Entities.Mail;
 using Wino.Core.Domain.Entities.Shared;
 using Wino.Core.Domain.Enums;
+using Wino.Core.Domain.Models.MailItem;
 using Wino.Mail.WinUI.Controls;
 
 namespace Wino.Helpers;
@@ -52,6 +53,7 @@ public static class XamlHelpers
     public static Visibility CountToVisibilityConverterWithThreshold(int value, int threshold) => value > threshold ? Visibility.Visible : Visibility.Collapsed;
     public static ListViewSelectionMode BoolToSelectionMode(bool isSelectionMode) => isSelectionMode ? ListViewSelectionMode.Multiple : ListViewSelectionMode.None;
     public static string BoolToSelectionModeText(bool isSelectionMode) => isSelectionMode ? Translator.Buttons_Cancel : Translator.Buttons_Multiselect;
+    public static string ConditionalString(bool condition, string trueValue, string falseValue) => condition ? trueValue : falseValue;
 
     public static Microsoft.UI.Xaml.Media.Imaging.BitmapImage? Base64ToBitmapImage(string base64String)
     {
@@ -71,6 +73,26 @@ public static class XamlHelpers
             return null;
         }
     }
+
+    public static Microsoft.UI.Xaml.Media.Imaging.BitmapImage? StringToBitmapImage(string? imagePath)
+    {
+        if (string.IsNullOrWhiteSpace(imagePath))
+            return null;
+
+        try
+        {
+            var uri = imagePath.StartsWith("/")
+                ? new Uri($"ms-appx://{imagePath}")
+                : new Uri(imagePath, UriKind.Absolute);
+
+            return new Microsoft.UI.Xaml.Media.Imaging.BitmapImage(uri);
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
     public static InfoBarSeverity InfoBarSeverityConverter(InfoBarMessageType messageType)
     {
         return messageType switch
@@ -130,6 +152,12 @@ public static class XamlHelpers
     public static Color GetWindowsColorFromHex(string hex) => hex.ToColor();
 
     public static SolidColorBrush GetSolidColorBrushFromHex(string colorHex) => string.IsNullOrEmpty(colorHex) ? new SolidColorBrush(Colors.Transparent) : new SolidColorBrush(colorHex.ToColor());
+    public static SolidColorBrush GetCategoryTextBrush(string textColorHex, string backgroundColorHex)
+        => !string.IsNullOrWhiteSpace(textColorHex)
+            ? GetSolidColorBrushFromHex(textColorHex)
+            : string.IsNullOrWhiteSpace(backgroundColorHex)
+                ? new SolidColorBrush(Colors.Black)
+                : GetReadableTextColor(backgroundColorHex);
     public static FontWeight GetFontWeightBySyncState(bool isSyncing) => isSyncing ? FontWeights.SemiBold : FontWeights.Normal;
 
     public static Brush GetWizardStepBadgeBrush(bool isActive)
@@ -163,6 +191,14 @@ public static class XamlHelpers
     }
     public static string GetMailGroupDateString(object groupObject)
     {
+        if (groupObject is MailListGroupKey pinnedGroupKey)
+        {
+            if (pinnedGroupKey.IsPinned)
+                return Translator.FolderCustomization_SectionPinned;
+
+            groupObject = pinnedGroupKey.Value!;
+        }
+
         if (groupObject is string stringObject)
             return stringObject;
 
@@ -273,6 +309,10 @@ public static class XamlHelpers
             _ => WinoIconGlyph.None,
         };
     }
+
+    // Segoe Fluent icon glyphs for the show/hide toggle on the folder
+    // customization page. E7B3 = "Hide" (eye with slash), E7B2 = "RedEye".
+    public static string GetHideGlyph(bool isHidden) => isHidden ? "\uE7B3" : "\uE7B2";
 
     public static WinoIconGlyph GetSpecialFolderPathIconGeometry(SpecialFolderType specialFolderType)
     {

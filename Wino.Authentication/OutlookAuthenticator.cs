@@ -65,7 +65,10 @@ public class OutlookAuthenticator : BaseAuthenticator, IOutlookAuthenticator
         _publicClientApplication = outlookAppBuilder.Build();
     }
 
-    public string[] Scope => AuthenticatorConfig.OutlookScope;
+    private string[] GetScope(MailAccount account)
+        => AuthenticatorConfig.GetOutlookScope(
+            account?.IsMailAccessGranted != false,
+            account?.IsCalendarAccessGranted == true);
 
     private async Task EnsureTokenCacheAttachedAsync()
     {
@@ -91,7 +94,7 @@ public class OutlookAuthenticator : BaseAuthenticator, IOutlookAuthenticator
 
         try
         {
-            var authResult = await _publicClientApplication.AcquireTokenSilent(Scope, storedAccount).ExecuteAsync();
+            var authResult = await _publicClientApplication.AcquireTokenSilent(GetScope(account), storedAccount).ExecuteAsync();
 
             return new TokenInformationEx(authResult.AccessToken, authResult.Account.Username);
         }
@@ -102,10 +105,6 @@ public class OutlookAuthenticator : BaseAuthenticator, IOutlookAuthenticator
             // The calling code should update account.IsCalendarAccessGranted = true after successful authentication.
 
             return await GenerateTokenInformationAsync(account);
-        }
-        catch (Exception)
-        {
-            throw;
         }
     }
 
@@ -122,17 +121,11 @@ public class OutlookAuthenticator : BaseAuthenticator, IOutlookAuthenticator
             if (_nativeAppService.GetCoreWindowHwnd == null) throw new AuthenticationAttentionException(account);
 
             AuthenticationResult authResult = await _publicClientApplication
-                .AcquireTokenInteractive(Scope)
+                .AcquireTokenInteractive(GetScope(account))
                 .ExecuteAsync();
 
-            // If the account is null, it means it's the initial creation of it.
-            // If not, make sure the authenticated user address matches the username.
-            // When people refresh their token, accounts must match.
-
-            if (account?.Address != null && !account.Address.Equals(authResult.Account.Username, StringComparison.OrdinalIgnoreCase))
-            {
-                throw new AuthenticationException("Authenticated address does not match with your account address. If you are signing with a Office365, it is not officially supported yet.");
-            }
+            // Microsoft 365 work/school tenants can use a sign-in UPN that differs from
+            // the mailbox primary SMTP address, so interactive reauth must not reject them.
 
             return new TokenInformationEx(authResult.AccessToken, authResult.Account.Username);
         }

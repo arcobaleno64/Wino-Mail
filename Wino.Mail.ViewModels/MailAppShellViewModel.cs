@@ -15,11 +15,13 @@ using Wino.Core.Domain.Entities.Shared;
 using Wino.Core.Domain.Enums;
 using Wino.Core.Domain.Interfaces;
 using Wino.Core.Domain.MenuItems;
-using Wino.Core.Domain.Models.Folders;
 using Wino.Core.Domain.Models;
+using Wino.Core.Domain.Models.Folders;
+using Wino.Core.Domain.Models.Launch;
 using Wino.Core.Domain.Models.MailItem;
 using Wino.Core.Domain.Models.Navigation;
 using Wino.Core.Domain.Models.Synchronization;
+using Wino.Core.Requests.Folder;
 using Wino.Core.Services;
 using Wino.Mail.ViewModels.Data;
 using Wino.Messaging.Client.Accounts;
@@ -44,6 +46,8 @@ public partial class MailAppShellViewModel : MailBaseViewModel,
     IRecipient<AccountRemovedMessage>,
     IRecipient<AccountUpdatedMessage>
 {
+    private const string MailEmptyStateNavigationParameter = IdlePageViewModel.MailEmptyStateParameter;
+
     #region Menu Items
 
     [ObservableProperty]
@@ -72,6 +76,7 @@ public partial class MailAppShellViewModel : MailBaseViewModel,
     public IMenuItem CreatePrimaryMenuItem => CreateMailMenuItem;
 
     private readonly IFolderService _folderService;
+    private readonly IMailCategoryService _mailCategoryService;
     private readonly IConfigurationService _configurationService;
     private readonly IStartupBehaviorService _startupBehaviorService;
     private readonly IAccountService _accountService;
@@ -84,6 +89,7 @@ public partial class MailAppShellViewModel : MailBaseViewModel,
     private readonly IMimeFileService _mimeFileService;
     private readonly IWebView2RuntimeValidatorService _webView2RuntimeValidatorService;
     private readonly IStoreUpdateService _storeUpdateService;
+    private readonly IShareActivationService _shareActivationService;
 
     private readonly INativeAppService _nativeAppService;
     private readonly IMailService _mailService;
@@ -97,6 +103,7 @@ public partial class MailAppShellViewModel : MailBaseViewModel,
                              IMimeFileService mimeFileService,
                              INativeAppService nativeAppService,
                              IMailService mailService,
+                             IMailCategoryService mailCategoryService,
                              IAccountService accountService,
                              IContextMenuItemService contextMenuItemService,
                              IStoreRatingService storeRatingService,
@@ -109,7 +116,8 @@ public partial class MailAppShellViewModel : MailBaseViewModel,
                              IConfigurationService configurationService,
                              IStartupBehaviorService startupBehaviorService,
                              IWebView2RuntimeValidatorService webView2RuntimeValidatorService,
-                             IStoreUpdateService storeUpdateService)
+                             IStoreUpdateService storeUpdateService,
+                             IShareActivationService shareActivationService)
     {
         StatePersistenceService = statePersistanceService;
 
@@ -122,6 +130,7 @@ public partial class MailAppShellViewModel : MailBaseViewModel,
         _mimeFileService = mimeFileService;
         _nativeAppService = nativeAppService;
         _mailService = mailService;
+        _mailCategoryService = mailCategoryService;
         _folderService = folderService;
         _accountService = accountService;
         _contextMenuItemService = contextMenuItemService;
@@ -131,6 +140,7 @@ public partial class MailAppShellViewModel : MailBaseViewModel,
         _winoRequestDelegator = winoRequestDelegator;
         _webView2RuntimeValidatorService = webView2RuntimeValidatorService;
         _storeUpdateService = storeUpdateService;
+        _shareActivationService = shareActivationService;
     }
 
     protected override void OnDispatcherAssigned()
@@ -180,7 +190,7 @@ public partial class MailAppShellViewModel : MailBaseViewModel,
         // First clear all account menu items.
         MenuItems.RemoveRange(MenuItems.Where(a => a is IAccountMenuItem));
 
-        var accounts = await _accountService.GetAccountsAsync().ConfigureAwait(false);
+        var accounts = await GetMailEnabledAccountsAsync();
 
         List<Guid> initializedAccountIds = new();
 
@@ -274,6 +284,7 @@ public partial class MailAppShellViewModel : MailBaseViewModel,
         }
 
         await ProcessLaunchOptionsAsync();
+        await HandlePendingShareRequestAsync();
         await ValidateWebView2RuntimeAsync();
 
         if (shouldRunStartupFlows && !Debugger.IsAttached)
@@ -364,7 +375,7 @@ public partial class MailAppShellViewModel : MailBaseViewModel,
     private async Task ForceAllAccountSynchronizationsAsync()
     {
         // Run Inbox synchronization for all accounts on startup.
-        var accounts = await _accountService.GetAccountsAsync();
+        var accounts = await GetMailEnabledAccountsAsync();
 
         foreach (var account in accounts)
         {
@@ -392,7 +403,7 @@ public partial class MailAppShellViewModel : MailBaseViewModel,
                 if (_launchProtocolService.LaunchParameter is AccountMenuItemExtended accountExtendedMessage)
                 {
                     // Find the account that this folder and mail belongs to.
-                    var account = await _mailService.GetMailAccountByUniqueIdAsync(accountExtendedMessage.NavigateMailItem.UniqueId).ConfigureAwait(false);
+                    var account = await _mailService.GetMailAccountByUniqueIdAsync(accountExtendedMessage.NavigateMailItem.UniqueId);
 
                     if (account != null && MenuItems.TryGetAccountMenuItem(account.Id, out IAccountMenuItem accountMenuItem))
                     {
@@ -433,6 +444,9 @@ public partial class MailAppShellViewModel : MailBaseViewModel,
 
     private async Task ProcessLaunchDefaultAsync()
     {
+        if (await NavigateToMailEmptyStateIfNeededAsync())
+            return;
+
         if (PreferencesService.StartupEntityId == null)
         {
             NavigateToWelcomeWizard();
@@ -459,8 +473,16 @@ public partial class MailAppShellViewModel : MailBaseViewModel,
             }
             else
             {
-                // Fallback to the welcome wizard if startup entity is not found.
-                NavigateToWelcomeWizard();
+                var firstMailAccountMenuItem = MenuItems.FirstOrDefault(a => a is IAccountMenuItem) as IAccountMenuItem;
+                if (firstMailAccountMenuItem != null)
+                {
+                    firstMailAccountMenuItem.Expand();
+                    await ChangeLoadedAccountAsync(firstMailAccountMenuItem);
+                }
+                else
+                {
+                    NavigateToWelcomeWizard();
+                }
             }
         }
     }
@@ -616,6 +638,29 @@ public partial class MailAppShellViewModel : MailBaseViewModel,
         }
     }
 
+    public async Task CreateRootFolderAsync(IAccountMenuItem accountMenuItem)
+    {
+        var account = accountMenuItem?.HoldingAccounts?.FirstOrDefault();
+        if (account == null)
+            return;
+
+        var folderName = await _dialogService.ShowTextInputDialogAsync(
+            string.Empty,
+            Translator.AccountContextMenu_CreateFolder,
+            Translator.DialogMessage_CreateFolderMessage,
+            Translator.Buttons_Create);
+
+        if (string.IsNullOrWhiteSpace(folderName))
+            return;
+
+        var placeholderFolder = new MailItemFolder
+        {
+            MailAccountId = account.Id
+        };
+
+        await _winoRequestDelegator.ExecuteAsync(account.Id, [new CreateRootFolderRequest(placeholderFolder, folderName.Trim())]);
+    }
+
     public Task HandleAccountAttentionAsync(MailAccount account)
         => FixAccountIssuesAsync(account);
 
@@ -716,7 +761,8 @@ public partial class MailAppShellViewModel : MailBaseViewModel,
         {
             await HandleCreateNewMailAsync();
         }
-        else if (clickedMenuItem is IBaseFolderMenuItem baseFolderMenuItem && baseFolderMenuItem.HandlingFolders.All(a => a.IsMoveTarget))
+        else if (clickedMenuItem is IBaseFolderMenuItem baseFolderMenuItem &&
+                 (clickedMenuItem is IMailCategoryMenuItem or IMergedMailCategoryMenuItem || baseFolderMenuItem.HandlingFolders.All(a => a.IsMoveTarget)))
         {
             // Don't navigate to base folders that contain non-move target folders.
             // Theory: This is a special folder like Categories or More. Don't navigate to it.
@@ -788,11 +834,20 @@ public partial class MailAppShellViewModel : MailBaseViewModel,
     {
         // Get visible account menu items, ordered by merged accounts at the last.
         // We will update the unread counts for all single accounts and trigger UI refresh for merged menu items.
-        var accountMenuItems = MenuItems.GetAllAccountMenuItems().OrderBy(a => a.HoldingAccounts.Count());
+        List<IAccountMenuItem> accountMenuItems = null;
+
+        await ExecuteUIThread(() =>
+        {
+            accountMenuItems = MenuItems
+                .GetAllAccountMenuItems()
+                .OrderBy(a => a.HoldingAccounts.Count())
+                .ToList();
+        });
 
         // Individually get all single accounts' unread counts.
-        var accountIds = accountMenuItems.OfType<AccountMenuItem>().Select(a => a.AccountId);
+        var accountIds = accountMenuItems.OfType<AccountMenuItem>().Select(a => a.AccountId).ToList();
         var unreadCountResult = await _folderService.GetUnreadItemCountResultsAsync(accountIds).ConfigureAwait(false);
+        var unreadCategoryCountResult = await _mailCategoryService.GetUnreadCategoryCountResultsAsync(accountIds).ConfigureAwait(false);
 
         // Recursively update all folders' unread counts to 0.
         // Query above only returns unread counts that exists. We need to reset the rest to 0 first.
@@ -844,6 +899,29 @@ public partial class MailAppShellViewModel : MailBaseViewModel,
             }
         }
 
+        foreach (var unreadCategoryCount in unreadCategoryCountResult)
+        {
+            if (MenuItems.TryGetCategoryMenuItem(unreadCategoryCount.CategoryId, out var categoryMenuItem))
+            {
+                if (categoryMenuItem is IMergedMailCategoryMenuItem mergedCategoryMenuItem)
+                {
+                    await ExecuteUIThread(() =>
+                    {
+                        categoryMenuItem.UnreadItemCount = unreadCategoryCountResult
+                            .Where(a => mergedCategoryMenuItem.Categories.Any(b => b.Id == a.CategoryId))
+                            .Sum(a => a.UnreadItemCount);
+                    });
+                }
+                else
+                {
+                    await ExecuteUIThread(() =>
+                    {
+                        categoryMenuItem.UnreadItemCount = unreadCategoryCount.UnreadItemCount;
+                    });
+                }
+            }
+        }
+
         // Update unread badge after all unread counts are updated.
         await _notificationBuilder.UpdateTaskbarIconBadgeAsync();
     }
@@ -882,6 +960,11 @@ public partial class MailAppShellViewModel : MailBaseViewModel,
             operationAccount = selectedFolderMenuItem.ParentAccount;
         }
 
+        if (operationAccount?.IsMailAccessGranted == false)
+        {
+            operationAccount = null;
+        }
+
         // We couldn't find any account so far.
         // If there is only 1 account to use, use it. If not,
         // send a message for flyout so user can pick from it.
@@ -891,7 +974,7 @@ public partial class MailAppShellViewModel : MailBaseViewModel,
             // No selected account.
             // List all accounts and let user pick one.
 
-            var accounts = await _accountService.GetAccountsAsync();
+            var accounts = await GetMailEnabledAccountsAsync();
 
             if (!accounts.Any())
             {
@@ -943,6 +1026,9 @@ public partial class MailAppShellViewModel : MailBaseViewModel,
     }
 
     public async Task CreateNewMailForAsync(MailAccount account)
+        => await CreateNewMailForAsync(account, null);
+
+    public async Task CreateNewMailForAsync(MailAccount account, MailShareRequest shareRequest)
     {
         if (account == null) return;
 
@@ -973,6 +1059,11 @@ public partial class MailAppShellViewModel : MailBaseViewModel,
         };
 
         var (draftMailCopy, draftBase64MimeMessage) = await _mailService.CreateDraftAsync(account.Id, draftOptions).ConfigureAwait(false);
+
+        if (shareRequest?.Files?.Count > 0)
+        {
+            _shareActivationService.StagePendingComposeShareRequest(draftMailCopy.UniqueId, shareRequest);
+        }
 
         var draftPreparationRequest = new DraftPreparationRequest(account, draftMailCopy, draftBase64MimeMessage, draftOptions.Reason);
         await _winoRequestDelegator.ExecuteAsync(draftPreparationRequest);
@@ -1008,7 +1099,7 @@ public partial class MailAppShellViewModel : MailBaseViewModel,
 
     public async void Receive(MailtoProtocolMessageRequested message)
     {
-        var accounts = await _accountService.GetAccountsAsync();
+        var accounts = await GetMailEnabledAccountsAsync();
 
         MailAccount targetAccount = null;
 
@@ -1034,9 +1125,38 @@ public partial class MailAppShellViewModel : MailBaseViewModel,
         await CreateNewMailForAsync(targetAccount);
     }
 
+    public async Task HandlePendingShareRequestAsync()
+    {
+        var shareRequest = _shareActivationService.ConsumePendingShareRequest();
+
+        if (shareRequest?.Files == null || shareRequest.Files.Count == 0)
+            return;
+
+        var accounts = await GetMailEnabledAccountsAsync();
+
+        if (!accounts.Any())
+            return;
+
+        MailAccount targetAccount = null;
+
+        if (accounts.Count == 1)
+        {
+            targetAccount = accounts[0];
+        }
+        else
+        {
+            targetAccount = await _dialogService.ShowAccountPickerDialogAsync(accounts);
+        }
+
+        if (targetAccount == null)
+            return;
+
+        await CreateNewMailForAsync(targetAccount, shareRequest);
+    }
+
     private async Task RecreateMenuItemsAsync()
     {
-        await _menuRefreshSemaphore.WaitAsync().ConfigureAwait(false);
+        await _menuRefreshSemaphore.WaitAsync();
         try
         {
             await ExecuteUIThread(() =>
@@ -1086,7 +1206,10 @@ public partial class MailAppShellViewModel : MailBaseViewModel,
         else
         {
             await ExecuteUIThread(() => SelectedMenuItem = null);
-            NavigateToWelcomeWizard();
+            if (!await NavigateToMailEmptyStateIfNeededAsync())
+            {
+                NavigateToWelcomeWizard();
+            }
         }
     }
 
@@ -1096,6 +1219,37 @@ public partial class MailAppShellViewModel : MailBaseViewModel,
             null,
             NavigationReferenceFrame.ShellFrame,
             NavigationTransitionType.None);
+
+    private Task<List<MailAccount>> GetMailEnabledAccountsAsync()
+        => GetAccountsByCapabilityAsync(requireMail: true);
+
+    private async Task<List<MailAccount>> GetAccountsByCapabilityAsync(bool requireMail = false, bool requireCalendar = false)
+    {
+        var accounts = await _accountService.GetAccountsAsync();
+
+        return accounts
+            .Where(account => (!requireMail || account.IsMailAccessGranted) &&
+                              (!requireCalendar || account.IsCalendarAccessGranted))
+            .ToList();
+    }
+
+    private async Task<bool> NavigateToMailEmptyStateIfNeededAsync()
+    {
+        var accounts = await _accountService.GetAccountsAsync();
+        if (!accounts.Any() || accounts.Any(account => account.IsMailAccessGranted))
+            return false;
+
+        latestSelectedAccountMenuItem = null;
+        await ExecuteUIThread(() => SelectedMenuItem = null);
+
+        NavigationService.Navigate(
+            WinoPage.IdlePage,
+            MailEmptyStateNavigationParameter,
+            NavigationReferenceFrame.InnerShellFrame,
+            NavigationTransitionType.None);
+
+        return true;
+    }
 
     private bool IsAccountCurrentlyLoaded(Guid accountId)
     {
@@ -1283,7 +1437,9 @@ public partial class MailAppShellViewModel : MailBaseViewModel,
     public async void Receive(AccountRemovedMessage message)
     {
         var remainingAccounts = await _accountService.GetAccountsAsync().ConfigureAwait(false);
-        if (!remainingAccounts.Any())
+        var remainingMailAccounts = remainingAccounts.Where(account => account.IsMailAccessGranted).ToList();
+
+        if (!remainingMailAccounts.Any())
         {
             latestSelectedAccountMenuItem = null;
             await ExecuteUIThread(() =>
@@ -1292,6 +1448,12 @@ public partial class MailAppShellViewModel : MailBaseViewModel,
                 MenuItems?.Clear();
                 MenuItems?.Add(CreateMailMenuItem);
             });
+
+            if (remainingAccounts.Any())
+            {
+                await NavigateToMailEmptyStateIfNeededAsync();
+            }
+
             return;
         }
 
@@ -1311,22 +1473,34 @@ public partial class MailAppShellViewModel : MailBaseViewModel,
 
         await RecreateMenuItemsAsync();
 
+        if (!createdAccount.IsMailAccessGranted)
+        {
+            await NavigateToMailEmptyStateIfNeededAsync();
+        }
+
         if (!MenuItems.TryGetAccountMenuItem(createdAccount.Id, out IAccountMenuItem createdMenuItem))
         {
             Log.Warning("Created account {AccountId} could not be found in menu items after refresh.", createdAccount.Id);
+
+            if (!createdAccount.IsMailAccessGranted)
+                return;
+
             return;
         }
 
         await ChangeLoadedAccountAsync(createdMenuItem);
 
-        // Each created account should start a new synchronization automatically.
-        var options = new MailSynchronizationOptions()
+        if (createdAccount.IsMailAccessGranted)
         {
-            AccountId = createdAccount.Id,
-            Type = MailSynchronizationType.FullFolders,
-        };
+            // Each created account should start a new synchronization automatically.
+            var options = new MailSynchronizationOptions()
+            {
+                AccountId = createdAccount.Id,
+                Type = MailSynchronizationType.FullFolders,
+            };
 
-        Messenger.Send(new NewMailSynchronizationRequested(options));
+            Messenger.Send(new NewMailSynchronizationRequested(options));
+        }
 
         if (createdAccount.IsCalendarAccessGranted)
         {
@@ -1352,6 +1526,13 @@ public partial class MailAppShellViewModel : MailBaseViewModel,
     public async void Receive(AccountUpdatedMessage message)
     {
         var updatedAccount = message.Account;
+
+        if (!updatedAccount.IsMailAccessGranted || !MenuItems.TryGetAccountMenuItem(updatedAccount.Id, out _))
+        {
+            await RecreateMenuItemsAsync();
+            await RestoreSelectedAccountAfterMenuRefreshAsync(false);
+            return;
+        }
 
         await ExecuteUIThread(() =>
         {
